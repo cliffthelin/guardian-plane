@@ -9,8 +9,9 @@ version.workspace = true
 zbus.workspace = true
 
 [dev-dependencies]
+guardian-core = { path = "../guardian-core" }
 guardian-testkit = { path = "../guardian-testkit" }
+roxmltree.workspace = true
 
 [lints]
 workspace = true
-
