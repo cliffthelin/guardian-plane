@@ -8,5 +8,9 @@ version.workspace = true
 [dependencies]
 zbus.workspace = true
 
+[dev-dependencies]
+async-io = "2.6.0"
+guardian-testkit = { path = "../guardian-testkit" }
+
 [lints]
 workspace = true

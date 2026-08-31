@@ -14,8 +14,8 @@ use std::future::Future;
 use std::sync::Mutex;
 
 use guardian_core::authorization::{
-    AuthorizationOutcome, AuthorizationRequest, AuthorizationUnavailableReason, Authorizer,
-    PolkitAction,
+    AuthorizationError, AuthorizationOutcome, AuthorizationRequest, AuthorizationUnavailableReason,
+    Authorizer, PolkitAction,
 };
 use guardian_core::error::GuardianDbusError;
 use guardian_core::error::GuardianErrorCategory;
@@ -56,7 +56,7 @@ impl Authorizer for MockAuthorizer {
     fn authorize(
         &self,
         request: &AuthorizationRequest,
-    ) -> impl Future<Output = AuthorizationOutcome> + Send {
+    ) -> impl Future<Output = Result<AuthorizationOutcome, AuthorizationError>> + Send {
         let granted = self
             .grants
             .lock()
@@ -72,7 +72,7 @@ impl Authorizer for MockAuthorizer {
         } else {
             AuthorizationOutcome::Authorized
         };
-        std::future::ready(outcome)
+        std::future::ready(Ok(outcome))
     }
 }
 
@@ -132,8 +132,13 @@ impl AuthProbe {
         self.ordering_log.lock().unwrap().push("validated");
 
         let request = AuthorizationRequest::new(identity, action, interactive);
-        let outcome = self.authorizer.authorize(&request).await;
+        let authorization_result = self.authorizer.authorize(&request).await;
         self.ordering_log.lock().unwrap().push("authorized_checked");
+
+        // An infrastructure failure (the authorizer could not even reach a
+        // decision) is returned immediately, distinctly from an ordinary
+        // denied/unavailable decision — see `AuthorizationError`.
+        let outcome = authorization_result.map_err(AuthorizationError::into_dbus_error)?;
 
         if let Some(error) = outcome.into_dbus_error(action) {
             // Denied/unavailable: return now. Nothing below this line has

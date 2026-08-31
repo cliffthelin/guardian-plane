@@ -12,7 +12,9 @@
 use std::sync::Mutex;
 
 use guardian_core::authorization::polkit::PolkitAuthorizer;
-use guardian_core::authorization::{AuthorizationRequest, Authorizer, PolkitAction};
+use guardian_core::authorization::{
+    AuthorizationError, AuthorizationRequest, Authorizer, PolkitAction,
+};
 use guardian_core::error::{GuardianDbusError, GuardianErrorCategory};
 use guardian_core::identity::resolve_caller_identity;
 use zbus::blocking::connection;
@@ -77,9 +79,11 @@ impl AuthProbe {
         // The real, production polkit-backed authorizer — not a mock.
         let authorizer = PolkitAuthorizer::new(connection);
         let request = AuthorizationRequest::new(identity, action, interactive);
-        let outcome = authorizer.authorize(&request).await;
-        eprintln!("[g1-layer2-server] real polkit outcome: {outcome:?}");
+        let authorization_result = authorizer.authorize(&request).await;
+        eprintln!("[g1-layer2-server] real polkit result: {authorization_result:?}");
         self.ordering_log.lock().unwrap().push("authorized_checked");
+
+        let outcome = authorization_result.map_err(AuthorizationError::into_dbus_error)?;
 
         if let Some(error) = outcome.into_dbus_error(action) {
             return Err(error);
@@ -164,8 +168,13 @@ impl AuthProbe {
             &claimed_role,
             claimed_is_admin,
         );
-        self.attempt(PolkitAction::ModerateWrite, interactive, &header, connection)
-            .await
+        self.attempt(
+            PolkitAction::ModerateWrite,
+            interactive,
+            &header,
+            connection,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -187,8 +196,13 @@ impl AuthProbe {
             &claimed_role,
             claimed_is_admin,
         );
-        self.attempt(PolkitAction::HighRiskWrite, interactive, &header, connection)
-            .await
+        self.attempt(
+            PolkitAction::HighRiskWrite,
+            interactive,
+            &header,
+            connection,
+        )
+        .await
     }
 
     fn mutation_counts(&self) -> (u32, u32, u32, u32) {

@@ -33,8 +33,14 @@ fn method_for(action: &str) -> Option<&'static str> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    let [_, action, interactive, claimed_uid, claimed_username, claimed_is_admin] =
-        args.as_slice()
+    let [
+        _,
+        action,
+        interactive,
+        claimed_uid,
+        claimed_username,
+        claimed_is_admin,
+    ] = args.as_slice()
     else {
         eprintln!(
             "usage: g1-layer2-client <read|low|moderate|high> <true|false interactive> <claimed_uid> <claimed_username> <true|false claimed_is_admin>"

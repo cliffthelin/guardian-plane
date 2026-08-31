@@ -135,6 +135,49 @@ impl AuthorizationOutcome {
     }
 }
 
+/// A failure to *obtain* an authorization decision at all — deliberately
+/// distinct from every [`AuthorizationOutcome`] variant, none of which
+/// represent a failure of the authorization mechanism itself.
+///
+/// This is the type that keeps "the provider couldn't be reached" from ever
+/// being silently reinterpreted as "no authentication agent is available"
+/// (a real [`AuthorizationOutcome::Unavailable`]) or any other decision —
+/// the two are different in kind, not just in severity, and mixing them
+/// would let a real polkit/D-Bus outage present itself to a caller as an
+/// ordinary authentication-related outcome.
+#[derive(Debug)]
+pub enum AuthorizationError {
+    /// The authorization provider (real polkit, for [`polkit::PolkitAuthorizer`])
+    /// could not be reached or used to obtain a decision: the service is
+    /// unavailable, the D-Bus transport failed, the proxy could not be
+    /// constructed, or the provider's response could not be interpreted.
+    /// This is never a decision about the caller — it is Guardian being
+    /// unable to ask the question at all.
+    ProviderUnavailable(String),
+    /// A genuine internal Guardian invariant or programming failure, not a
+    /// provider-availability problem. Reserved for authorizer implementations
+    /// that can distinguish "my own logic is broken" from "the provider is
+    /// unreachable" — [`polkit::PolkitAuthorizer`] does not currently produce
+    /// this variant, since every failure mode it can observe is a provider
+    /// problem, not an internal one.
+    Internal(String),
+}
+
+impl AuthorizationError {
+    /// Maps this infrastructure failure to the corresponding existing typed
+    /// error. Always produces an error — an [`AuthorizationError`] is never
+    /// a "proceed" case, unlike [`AuthorizationOutcome`].
+    #[must_use]
+    pub fn into_dbus_error(self) -> GuardianDbusError {
+        match self {
+            Self::ProviderUnavailable(message) => {
+                GuardianErrorCategory::ProviderUnavailable.with_message(message)
+            }
+            Self::Internal(message) => GuardianErrorCategory::Internal.with_message(message),
+        }
+    }
+}
+
 /// A pluggable authorization decision source.
 ///
 /// Production code uses [`polkit::PolkitAuthorizer`], backed by the real
@@ -142,11 +185,13 @@ impl AuthorizationOutcome {
 /// the surrounding plumbing (ordering, error mapping, interactive-flag
 /// routing) without requiring a real bus or root.
 pub trait Authorizer {
-    /// Decides the outcome for `request`. Must not have any observable side
-    /// effect on Guardian's own state — only the caller, after inspecting the
-    /// outcome, may cause a mutation (TDD contract GP-05/GP-06; G1 handoff §7).
+    /// Decides the outcome for `request`, or reports that no decision could
+    /// be obtained at all (see [`AuthorizationError`]). Must not have any
+    /// observable side effect on Guardian's own state either way — only the
+    /// caller, after inspecting `Ok(AuthorizationOutcome::Authorized)`, may
+    /// cause a mutation (TDD contract GP-05/GP-06; G1 handoff §7).
     fn authorize(
         &self,
         request: &AuthorizationRequest,
-    ) -> impl Future<Output = AuthorizationOutcome> + Send;
+    ) -> impl Future<Output = Result<AuthorizationOutcome, AuthorizationError>> + Send;
 }

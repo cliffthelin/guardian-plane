@@ -4,12 +4,16 @@
 //! spoof-resistance guarantee that [`AuthorizationRequest`] has no field a
 //! client-supplied identity claim could occupy.
 
+use guardian_core::authorization::polkit::PolkitAuthorizer;
 use guardian_core::authorization::{
-    AuthorizationOutcome, AuthorizationRequest, AuthorizationUnavailableReason, PolkitAction,
+    AuthorizationError, AuthorizationOutcome, AuthorizationRequest, AuthorizationUnavailableReason,
+    Authorizer, PolkitAction,
 };
 use guardian_core::error::GuardianDbusError;
 use guardian_core::identity::CallerIdentity;
+use guardian_testkit::PrivateSessionBus;
 use zbus::DBusError;
+use zbus::connection as async_connection;
 
 fn identity(unique_name: &str) -> CallerIdentity {
     CallerIdentity::new(unique_name, Some(1000))
@@ -119,4 +123,66 @@ fn guardian_dbus_error_type_used_by_the_mapping_is_the_real_public_error_type() 
     // Guardian's public D-Bus surface uses — not a parallel error type.
     fn _takes_public_error(_: GuardianDbusError) {}
     assert_send::<GuardianDbusError>();
+}
+
+// --- AuthorizationError: infrastructure failure is distinct from every
+// authorization decision (D, F below; A/B/C already covered above). ---
+
+#[test]
+fn infrastructure_provider_unavailable_maps_to_provider_unavailable_never_authentication_unavailable()
+ {
+    let error = AuthorizationError::ProviderUnavailable("polkit authority unreachable".to_owned())
+        .into_dbus_error();
+    assert_eq!(
+        error.name().as_str(),
+        "io.github.cliffthelin.Guardian1.Error.ProviderUnavailable"
+    );
+}
+
+#[test]
+fn infrastructure_internal_maps_to_internal() {
+    let error = AuthorizationError::Internal("invariant violated".to_owned()).into_dbus_error();
+    assert_eq!(
+        error.name().as_str(),
+        "io.github.cliffthelin.Guardian1.Error.Internal"
+    );
+}
+
+/// Case E — the real `PolkitAuthorizer`, exercised for real (not a
+/// hand-built `AuthorizationError` value): a private test bus has no
+/// `org.freedesktop.PolicyKit1` service at all, so the real
+/// `CheckAuthorization` D-Bus call genuinely fails at the transport level.
+/// This proves the actual polkit.rs code path maps that failure to
+/// `ProviderUnavailable`, never to `AuthenticationUnavailable`.
+#[test]
+fn real_polkit_authorizer_maps_unreachable_provider_to_provider_unavailable() {
+    let bus = PrivateSessionBus::launch().expect("private D-Bus must launch");
+    let address = bus.address().to_owned();
+
+    async_io::block_on(async move {
+        let connection = async_connection::Builder::address(address.as_str())
+            .expect("parse private D-Bus address")
+            .build()
+            .await
+            .expect("connect to private D-Bus");
+
+        let authorizer = PolkitAuthorizer::new(&connection);
+        let request =
+            AuthorizationRequest::new(identity(":1.1"), PolkitAction::LowRiskWrite, false);
+
+        let result = authorizer.authorize(&request).await;
+
+        let error = match result {
+            Err(error) => error,
+            Ok(outcome) => panic!(
+                "expected an infrastructure failure against a bus with no polkit service, got {outcome:?}"
+            ),
+        };
+        let dbus_error = error.into_dbus_error();
+        assert_eq!(
+            dbus_error.name().as_str(),
+            "io.github.cliffthelin.Guardian1.Error.ProviderUnavailable",
+            "a real unreachable-provider failure must never surface as AuthenticationUnavailable"
+        );
+    });
 }
