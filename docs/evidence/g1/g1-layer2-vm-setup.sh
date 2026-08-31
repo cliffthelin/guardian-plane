@@ -35,12 +35,30 @@ sudo tee /etc/dbus-1/system.d/io.github.cliffthelin.Guardian1.G1LayerTwoHarness.
   </policy>
 </busconfig>
 EOF
-sudo systemctl restart dbus
+# NOT `systemctl restart dbus`: restarting the bus daemon process itself
+# severs every other service's existing connection to it (systemd-logind,
+# polkitd, ...) without them reliably reconnecting, which silently breaks
+# session tracking for the rest of this script. `reload` runs dbus-daemon's
+# own ReloadConfig over the existing process instead.
+sudo systemctl reload dbus
 
 # --- polkit action definitions: the four G1 test actions (TDD contract §9).
 #     moderate-write requires interactive self-authentication; the other
 #     three have no implicit grant at all, so only the rules.d file below can
-#     authorize them. ---
+#     authorize them.
+#
+#     moderate-write sets all three of allow_any/allow_inactive/allow_active
+#     to auth_self, not just allow_active. Root cause found the hard way:
+#     polkit classifies a session with no seat (which includes every SSH
+#     session, since remote logins are never seat-attached) under
+#     allow_any, not allow_active or allow_inactive — allow_active alone
+#     left allow_any at its default "no", which is a hard, unchallengeable
+#     deny for exactly the session type this test needs to exercise
+#     (TDD contract §8.4's "VT/recovery-style non-graphical session").
+#     Confirmed empirically: with only allow_active=auth_self, even
+#     `pkcheck --enable-internal-agent --allow-user-interaction` over SSH
+#     never showed a prompt; setting allow_any=auth_self as well produced a
+#     real password challenge on the first attempt. ---
 sudo tee /usr/share/polkit-1/actions/io.github.cliffthelin.guardian.test.policy > /dev/null <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
@@ -60,7 +78,7 @@ sudo tee /usr/share/polkit-1/actions/io.github.cliffthelin.guardian.test.policy 
   <action id="guardian.test.moderate-write">
     <description>Guardian G1 test action: moderate-risk write</description>
     <message>Guardian G1 test moderate-risk write</message>
-    <defaults><allow_any>no</allow_any><allow_inactive>no</allow_inactive><allow_active>auth_self</allow_active></defaults>
+    <defaults><allow_any>auth_self</allow_any><allow_inactive>auth_self</allow_inactive><allow_active>auth_self</allow_active></defaults>
   </action>
   <action id="guardian.test.high-risk-write">
     <description>Guardian G1 test action: high-risk write</description>

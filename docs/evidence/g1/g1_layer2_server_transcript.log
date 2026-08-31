@@ -21,3 +21,18 @@
 [g1-layer2-server] real polkit outcome: Denied
 [g1-layer2-server] resolved caller: unique_name=:1.62 uid=Some(1001)
 [g1-layer2-server] real polkit outcome: Denied
+
+--- completion pass (2026-08-30, later same day), guardian-g1-vm3, fixed policy ---
+[g1-layer2-server] serving io.github.cliffthelin.Guardian1.G1LayerTwoHarness at /io/github/cliffthelin/Guardian1/G1LayerTwoHarness, unique_name=:1.87
+[g1-layer2-server] resolved caller: unique_name=:1.90 uid=Some(1001)
+[g1-layer2-server] real polkit outcome: Authorized
+[g1-layer2-server] resolved caller: unique_name=:1.95 uid=Some(1001)
+[g1-layer2-server] real polkit outcome: Unavailable(NoAuthenticationAgent)
+[g1-layer2-server] resolved caller: unique_name=:1.99 uid=Some(1001)
+[g1-layer2-server] real polkit outcome: Unavailable(InteractionRequiredButDisallowed)
+[g1-layer2-server] resolved caller: unique_name=:1.100 uid=Some(1001)
+[g1-layer2-server] real polkit outcome: Authorized
+[g1-layer2-server] resolved caller: unique_name=:1.101 uid=Some(1002)
+[g1-layer2-server] real polkit outcome: Denied
+[g1-layer2-server] resolved caller: unique_name=:1.102 uid=Some(1001)
+[g1-layer2-server] real polkit outcome: Denied
