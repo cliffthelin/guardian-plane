@@ -1,0 +1,16 @@
+[package]
+name = "guardian-daemon"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+zbus.workspace = true
+
+[dev-dependencies]
+guardian-testkit = { path = "../guardian-testkit" }
+
+[lints]
+workspace = true
+
