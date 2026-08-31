@@ -141,12 +141,26 @@ or planned Guardian capability area. For each, state one of:
 
 ```text
 no privilege
-D-Bus authorization only
+provider-owned authorization — Guardian calls another already-authoritative
+    privileged service that performs its own authorization (e.g. UDisks'
+    PowerOff() does its own polkit check internally); Guardian itself needs
+    no elevated privilege for this area beyond being an ordinary D-Bus client
+D-Bus authorization only — Guardian's own method is polkit-gated, but the
+    underlying action requires no further OS-level privilege once authorized
 specific device/file access
 specific Linux capability
 root/system privilege
 unknown — requires host research
 ```
+
+The `provider-owned authorization` category matters and is not
+interchangeable with `D-Bus authorization only`: many "system-management"
+capability areas may turn out to need *zero* privilege from Guardian at
+all, because the authoritative provider already gates the write itself.
+Conflating the two categories would understate how many areas can avoid
+elevating Guardian's own process, in either model. Check each provider's
+actual D-Bus interface for its own authorization annotations/behavior
+before defaulting to `D-Bus authorization only`.
 
 Cover at minimum, from TDD contract §26 and the broader capability areas
 named in the governing research:
@@ -293,10 +307,28 @@ Execute(argv)
 generic root RPC
 ```
 
-or any semantic equivalent — including a helper method whose action
-parameter is an unbounded string routed to a shell, or a "generic apply"
-method that accepts an arbitrary typed-but-unbounded operation. Every
-helper method must be individually typed and individually authorized.
+or any semantic equivalent. A different method name does not exempt a
+design from this rule — the following are exactly as forbidden as
+`RunCommand`, because each still lets the caller drive unbounded privileged
+behavior through its arguments rather than through a fixed, individually
+authorized operation:
+
+```text
+WriteFile(path, bytes)
+SetSysfs(path, value)
+CallDbus(service, path, method, args)
+ExecuteProvider(name, opaque_payload)
+Invoke(action_name, arbitrary_json)
+```
+
+Every helper method must be individually typed (fixed operation, fixed
+argument shape — no path/payload/argv parameter that lets the caller choose
+*what* gets touched or *what* gets run) and individually authorized (its
+own polkit action id, not a shared "perform this generic operation" grant).
+When reviewing a candidate helper method, ask: does this method's argument
+shape let a caller reach anywhere in the filesystem, device tree, or D-Bus
+namespace it wants, merely by varying an argument? If yes, it is a generic
+broker regardless of its name.
 
 ---
 
@@ -435,6 +467,32 @@ CAP_SYS_PTRACE
 Every proposed capability, for either model, needs: which inventoried
 capability area requires it, why a narrower alternative doesn't suffice,
 and what a compromised process with only that capability could still do.
+
+## Privilege creep is an architectural signal, not just a per-item cost
+
+Justifying each capability, hardening exception, or `ReadWritePaths=`
+addition individually is necessary but not sufficient. Before writing the
+ADR's decision, review the *accumulated* set of exceptions for whichever
+model is trending toward selection: if the individually-justified
+exceptions, taken together, add up to something functionally close to
+unrestricted access, that is itself a finding against the model — it means
+the granular-justification process was satisfied while the actual
+minimization goal was not. Watch specifically for a pattern like:
+
+```text
+need one privileged operation      → grant/root justified for it
+need another filesystem path       → ProtectSystem= weakened
+need one more device                → PrivateDevices= disabled
+need one more subsystem             → a broad capability added
+tests now pass                      → architecture declared complete
+```
+
+Each step above might individually satisfy this handoff's per-item
+justification requirement while the cumulative result is not meaningfully
+different from the daemon simply running unrestricted. If this pattern
+appears in the evidence for either model, say so explicitly in the ADR
+rather than letting the per-item justifications stand in for an honest
+cumulative assessment.
 
 ---
 

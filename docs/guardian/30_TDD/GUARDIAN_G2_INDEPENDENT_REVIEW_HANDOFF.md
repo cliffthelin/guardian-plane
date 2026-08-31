@@ -59,6 +59,11 @@ this gate, not a pass with caveats.
   than guessed?
 - Does the inventory actually drive the capability-bounding decisions for
   both models, or is it decorative?
+- Where a capability area is classified `D-Bus authorization only`, was it
+  checked whether the underlying provider actually performs its own
+  authorization (making it `provider-owned authorization`, needing no
+  Guardian privilege at all), rather than defaulting to the more privileged
+  classification out of convenience?
 
 ## Capability justification
 
@@ -69,6 +74,13 @@ this gate, not a pass with caveats.
   without exceptional, itemized justification is a blocking finding.
 - Is full root proposed anywhere without first showing that no capability
   subset was sufficient?
+- Do the individually-justified exceptions (capabilities, hardening
+  weakenings, `ReadWritePaths=` grants), taken together, add up to
+  something functionally close to unrestricted access for the selected
+  model? Per-item justification satisfied while the cumulative result
+  defeats minimization is itself a blocking finding, not a pass with
+  caveats (implementation handoff §12, "Privilege creep is an architectural
+  signal").
 
 ## Helper design (Model B, if built)
 
@@ -223,7 +235,15 @@ or code that settles it, not a general assurance:
     `ProtectHome=`/`ReadWritePaths=` configuration?
 13. Could the helper, as designed, be driven by any client to perform an
     operation equivalent to a general-purpose root command broker — even
-    indirectly, through some combination of its typed methods?
+    indirectly, through some combination of its typed methods, or through a
+    method whose name avoids `RunCommand`/`RunShell`/`Execute` but whose
+    argument shape is functionally equivalent — e.g. `WriteFile(path, bytes)`,
+    `SetSysfs(path, value)`, `CallDbus(service, path, method, args)`,
+    `ExecuteProvider(name, opaque_payload)`, `Invoke(action_name, arbitrary_json)`?
+    A name-only blacklist check is insufficient here — evaluate whether the
+    method's *argument shape* lets a caller reach anywhere in the
+    filesystem/device tree/D-Bus namespace it wants merely by varying an
+    argument.
 
 ## Test-quality audit
 
