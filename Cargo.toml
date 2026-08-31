@@ -1,0 +1,26 @@
+[workspace]
+members = [
+    "crates/guardian-core",
+    "crates/guardian-provider-api",
+    "crates/guardian-daemon",
+    "crates/guardian-testkit",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+version = "0.1.0"
+
+[workspace.dependencies]
+sha2 = "0.10.9"
+zbus = { version = "5.12.0", features = ["blocking-api"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "deny"
+pedantic = "deny"
+
