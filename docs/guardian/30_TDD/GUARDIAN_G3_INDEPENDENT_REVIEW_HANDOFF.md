@@ -62,10 +62,19 @@ FAIL — TEST INSUFFICIENT
 FAIL — NONDETERMINISTIC CORE MODEL
 FAIL — CAPABILITY/PROVIDER IDENTITY CONFLATED
 FAIL — SINGLE-WRITER MODEL UNSAFE
-FAIL — AUTHORIZATION OWNERSHIP CONFLATED
+FAIL — AUTHORIZATION / PRIVILEGE DIMENSIONS CONFLATED
 FAIL — G2 PRIVILEGE BOUNDARY REGRESSION
 FAIL — G4/G8 SCOPE LEAK
 ```
+
+`FAIL — AUTHORIZATION / PRIVILEGE DIMENSIONS CONFLATED` replaces the
+narrower `FAIL — AUTHORIZATION OWNERSHIP CONFLATED` concept from an
+earlier draft of this handoff. It covers both: (a) authorization ownership
+itself being conflated with something else, and (b) — the specific defect
+this handoff was repaired to catch — a single field/enum being used to
+represent *both* "who owns authorization" and "what OS privilege/access is
+required," which are two independent dimensions per the implementation
+handoff §5.
 
 A `PASS` means the core data models are sound enough to become Guardian's
 G3 milestone.
@@ -155,19 +164,75 @@ writers, or silently resolves ambiguity to a writer, verdict is
 
 ---
 
-# 8. Authorization ownership audit
+# 8. Authorization ownership and privilege/access requirement audit
+
+This gate's central structural check is that these are **two independent
+dimensions**, each with its own field/type, never one field representing
+both.
+
+## 8.1 Authorization ownership (Dimension A — `authorization_mode`)
 
 - Confirm `authorization_mode` (or equivalent) has exactly the three
-  states G2 established: no privilege / provider-owned authorization /
-  Guardian-owned (polkit) authorization — not collapsed into a boolean,
-  not expanded with an unevidenced fourth state.
-- Cross-check the type against all 24 rows of
-  `docs/evidence/g2/PRIVILEGE_REQUIREMENT_INVENTORY.md`: does every row's
-  classification map onto this enum without loss or reinterpretation?
+  states G2 established: `NoAuthorizationRequired` /
+  `ProviderOwnedAuthorization` / `GuardianOwnedAuthorization` — not
+  collapsed into a boolean, not expanded with an unevidenced fourth state.
+- Confirm this field answers only "who performs/owns authorization?" —
+  never "what OS privilege is required?" and never "is the current caller
+  authorized?"
 - Confirm `ProviderOwnedAuthorization` is never rendered or documented as
   "Guardian is privileged" anywhere (code, doc comments, tests).
+- Confirm an unrecognized wire value for this specific field fails closed
+  via a typed parse/deserialization error, and does **not** become any of
+  the three governed states, and does **not** silently gain a fourth
+  runtime `Unknown` variant unless the governing contract is shown to
+  require one (implementation handoff §10).
 
-If these are conflated, verdict is `FAIL — AUTHORIZATION OWNERSHIP CONFLATED`.
+## 8.2 Privilege/access requirement (Dimension B — `privilege_requirement`
+or equivalent)
+
+- Confirm a **separate** typed field/model exists for "what OS-level
+  privilege/access does this operation require, independent of who
+  authorizes it?" — reusing the G2 inventory's own category names (no
+  direct privilege / specific file-device access / specific Linux
+  capability / root-system privilege / unknown-requires-host-research).
+- Confirm this dimension carries a real runtime `Unknown` variant (not
+  merely a parse-error fallback) — the G2 inventory has 8 genuinely
+  unresearched rows, and that is legitimate information the model must be
+  able to hold, not an error state to reject.
+- Confirm `RootOrSystemPrivilege` is never rendered or documented as
+  implying `GuardianOwnedAuthorization`, and vice versa.
+
+## 8.3 Cross-check against the G2 inventory (both dimensions, separately)
+
+- Cross-check `authorization_mode` against all 24 rows of
+  `docs/evidence/g2/PRIVILEGE_REQUIREMENT_INVENTORY.md`: does every row's
+  authorization-ownership classification map onto this enum without loss?
+- **Separately**, cross-check `privilege_requirement` against the same 24
+  rows: does every row's privilege/access classification (including all 8
+  `unknown — requires host research` rows remaining `Unknown`) map onto
+  this model without loss?
+- Confirm these are reported as two distinct mappings in the completion
+  report, not one combined claim.
+- Spot-check the `power-profiles-daemon (HoldProfile)` row specifically:
+  it must land on `authorization_mode = GuardianOwnedAuthorization` *and*
+  `privilege_requirement = NoDirectPrivilege` simultaneously — if the
+  implementation cannot represent this combination, that is the exact
+  defect this handoff was repaired to catch.
+
+## 8.4 Independence proof
+
+- Confirm a test exists proving the two fields serialize/deserialize and
+  vary independently (implementation handoff §16.1, item 5) — changing one
+  dimension's value must not affect the other's stored value or its own
+  round-trip correctness.
+- Confirm changing `privilege_requirement` never alters `capability_id`,
+  and changing `authorization_mode` never alters `provider_id`
+  (implementation handoff §16.1, items 7–8).
+
+If any of the above shows the two dimensions collapsed into one field, one
+dimension silently implying a value for the other, or an unknown state on
+one dimension forcing a false-known or false-unknown state on the other,
+verdict is `FAIL — AUTHORIZATION / PRIVILEGE DIMENSIONS CONFLATED`.
 
 ---
 
@@ -188,7 +253,9 @@ runs entirely in the domain G2 designated unprivileged.
 - Does `authorization_mode` describe *what kind of authorization a
   capability needs* (correct) rather than *whether the current caller
   currently has it* (would be a category error and a potential regression
-  vector)?
+  vector)? Does `privilege_requirement` describe *what OS privilege the
+  operation needs* (correct) rather than *what privilege the current
+  process holds* (also a category error)?
 
 If G3 introduces anything that could let a core-owned value be mistaken
 for privileged authorization/identity proof, verdict is
@@ -215,13 +282,29 @@ If any of these exist, verdict is `FAIL — G4/G8 SCOPE LEAK`.
 
 # 11. Unknown-handling audit
 
-For each governed enum (`availability`, `health`, `authorization_mode`,
-`boot_availability`, `rollback_kind`, `current_owner`, incident `status`,
-event `severity`): confirm a real test exists that feeds an unrecognized
-value and asserts an explicit unknown/parse-failure result — not a panic,
-not a silent default to a safe/available/authorized value. Spot-check at
-least three of these by direct inspection rather than trusting the
-completion report's claim.
+Confirm the two authorization/privilege dimensions follow their own,
+different rules (implementation handoff §10) — do not accept one blanket
+"unknown handling" claim covering both:
+
+- `authorization_mode` specifically: an unrecognized wire value produces a
+  typed parse/deserialization error and fails closed — it does **not**
+  become one of the three governed states, and does **not** gain a runtime
+  `Unknown` fourth variant unless the governing contract is shown to
+  require one. If the implementation added an `Unknown` variant to this
+  specific enum without such justification, that is a finding — flag it.
+- `privilege_requirement` and every other governed enum
+  (`availability`, `health`, `boot_availability`, `rollback_kind`,
+  `current_owner`, incident `status`, event `severity`): confirm a real
+  test exists that feeds an unrecognized value and asserts an explicit
+  `Unknown`/parse-failure result — not a panic, not a silent default to a
+  safe/available/authorized value.
+
+Spot-check at least three enums by direct inspection rather than trusting
+the completion report's claim, and confirm the implementation and review
+handoffs' descriptions of `authorization_mode`'s specific rule actually
+match what was built (§10 requires the two handoff documents to describe
+the *same* rule — if the code disagrees with either document, that is
+itself a finding).
 
 ---
 
@@ -236,6 +319,35 @@ completion report's claim.
 ---
 
 # 13. Adversarial questions (mirror the implementation handoff's §16, verify each independently)
+
+## 13.1 Authorization/privilege dimension questions (mirrors implementation handoff §16.1)
+
+a. does an unrecognized/future `privilege_requirement` wire value silently
+   become `NoDirectPrivilege`?
+b. is `authorization_mode = ProviderOwnedAuthorization` ever conflated
+   with "Guardian holds elevated privilege"?
+c. does `authorization_mode = GuardianOwnedAuthorization` imply
+   `privilege_requirement = RootOrSystemPrivilege` anywhere (check the
+   `power-profiles-daemon HoldProfile` fixture specifically — it must
+   prove the opposite)?
+d. does `privilege_requirement = RootOrSystemPrivilege` imply
+   `authorization_mode = GuardianOwnedAuthorization` anywhere?
+e. do `authorization_mode` and `privilege_requirement` round-trip
+   independently through serialization (test every combination of known/
+   unknown across both)?
+f. does an unrecognized wire value for `authorization_mode` specifically
+   fail closed via a typed parse error, rather than becoming
+   `NoAuthorizationRequired` or gaining an unjustified runtime `Unknown`
+   variant?
+g. does changing `privilege_requirement` on a capability ever alter its
+   `capability_id`?
+h. does changing `authorization_mode` on a capability ever alter its
+   `provider_id`?
+
+Report each as confirmed safe / confirmed unsafe / not applicable, with
+the specific file/test supporting the conclusion — same as §13.2 below.
+
+## 13.2 General adversarial questions
 
 1. reversed provider order — same decision?
 2. same capability, two providers — deterministic, explained authority
@@ -294,7 +406,9 @@ failed) still passes unmodified, plus the new G3 tests, all green.
 4. Capability/provider identity separation (§5)
 5. Determinism audit (§6)
 6. Single-writer/arbitration audit (§7)
-7. Authorization ownership audit (§8)
+7. Authorization ownership and privilege/access requirement audit (§8),
+   reporting §8.1–§8.4 separately, including the two distinct G2-inventory
+   mapping tables (one per dimension) and the independence-proof result
 8. G2 privilege-boundary regression audit (§9)
 9. Scope-leak audit (§10)
 10. Unknown-handling audit (§11)
