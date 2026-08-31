@@ -1,13 +1,10 @@
 //! Stable public error categories and deterministic D-Bus identities.
 
-const ERROR_PREFIX: &str = "org.guardianproject.Development.Guardian1.Error";
+const ERROR_PREFIX: &str = "io.github.cliffthelin.Guardian1.Error";
 
 /// D-Bus-native Guardian errors exposed at the public IPC boundary.
 #[derive(Debug, zbus::DBusError)]
-#[zbus(
-    prefix = "org.guardianproject.Development.Guardian1.Error",
-    impl_display = true
-)]
+#[zbus(prefix = "io.github.cliffthelin.Guardian1.Error", impl_display = true)]
 pub enum GuardianDbusError {
     NotAuthorized(String),
     AuthenticationUnavailable(String),
@@ -100,68 +97,46 @@ impl GuardianErrorCategory {
     #[must_use]
     pub const fn dbus_error_name(self) -> &'static str {
         match self {
-            Self::NotAuthorized => concat!(
-                "org.guardianproject.Development.Guardian1.Error",
-                ".NotAuthorized"
-            ),
+            Self::NotAuthorized => {
+                concat!("io.github.cliffthelin.Guardian1.Error", ".NotAuthorized")
+            }
             Self::AuthenticationUnavailable => concat!(
-                "org.guardianproject.Development.Guardian1.Error",
+                "io.github.cliffthelin.Guardian1.Error",
                 ".AuthenticationUnavailable"
             ),
-            Self::Unsupported => concat!(
-                "org.guardianproject.Development.Guardian1.Error",
-                ".Unsupported"
-            ),
+            Self::Unsupported => concat!("io.github.cliffthelin.Guardian1.Error", ".Unsupported"),
             Self::ProviderUnavailable => concat!(
-                "org.guardianproject.Development.Guardian1.Error",
+                "io.github.cliffthelin.Guardian1.Error",
                 ".ProviderUnavailable"
             ),
-            Self::ProviderChanged => concat!(
-                "org.guardianproject.Development.Guardian1.Error",
-                ".ProviderChanged"
-            ),
+            Self::ProviderChanged => {
+                concat!("io.github.cliffthelin.Guardian1.Error", ".ProviderChanged")
+            }
             Self::PreconditionFailed => concat!(
-                "org.guardianproject.Development.Guardian1.Error",
+                "io.github.cliffthelin.Guardian1.Error",
                 ".PreconditionFailed"
             ),
-            Self::Conflict => concat!(
-                "org.guardianproject.Development.Guardian1.Error",
-                ".Conflict"
-            ),
-            Self::Busy => concat!("org.guardianproject.Development.Guardian1.Error", ".Busy"),
-            Self::TimedOut => concat!(
-                "org.guardianproject.Development.Guardian1.Error",
-                ".TimedOut"
-            ),
-            Self::Cancelled => concat!(
-                "org.guardianproject.Development.Guardian1.Error",
-                ".Cancelled"
-            ),
-            Self::InvalidRequest => concat!(
-                "org.guardianproject.Development.Guardian1.Error",
-                ".InvalidRequest"
-            ),
-            Self::Unsafe => concat!("org.guardianproject.Development.Guardian1.Error", ".Unsafe"),
-            Self::ApplyFailed => concat!(
-                "org.guardianproject.Development.Guardian1.Error",
-                ".ApplyFailed"
-            ),
+            Self::Conflict => concat!("io.github.cliffthelin.Guardian1.Error", ".Conflict"),
+            Self::Busy => concat!("io.github.cliffthelin.Guardian1.Error", ".Busy"),
+            Self::TimedOut => concat!("io.github.cliffthelin.Guardian1.Error", ".TimedOut"),
+            Self::Cancelled => concat!("io.github.cliffthelin.Guardian1.Error", ".Cancelled"),
+            Self::InvalidRequest => {
+                concat!("io.github.cliffthelin.Guardian1.Error", ".InvalidRequest")
+            }
+            Self::Unsafe => concat!("io.github.cliffthelin.Guardian1.Error", ".Unsafe"),
+            Self::ApplyFailed => concat!("io.github.cliffthelin.Guardian1.Error", ".ApplyFailed"),
             Self::ObservationFailed => concat!(
-                "org.guardianproject.Development.Guardian1.Error",
+                "io.github.cliffthelin.Guardian1.Error",
                 ".ObservationFailed"
             ),
-            Self::RollbackFailed => concat!(
-                "org.guardianproject.Development.Guardian1.Error",
-                ".RollbackFailed"
-            ),
+            Self::RollbackFailed => {
+                concat!("io.github.cliffthelin.Guardian1.Error", ".RollbackFailed")
+            }
             Self::PersistenceFailed => concat!(
-                "org.guardianproject.Development.Guardian1.Error",
+                "io.github.cliffthelin.Guardian1.Error",
                 ".PersistenceFailed"
             ),
-            Self::Internal => concat!(
-                "org.guardianproject.Development.Guardian1.Error",
-                ".Internal"
-            ),
+            Self::Internal => concat!("io.github.cliffthelin.Guardian1.Error", ".Internal"),
         }
     }
 

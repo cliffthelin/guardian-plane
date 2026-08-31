@@ -8,10 +8,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use zbus::blocking::{Connection, Proxy, connection};
 
 const EXPECTED_XML: &str =
-    include_str!("../../../dbus/interfaces/org.guardianproject.Development.Guardian1.xml");
-const GUARDIAN_INTERFACE_PREFIX: &str = "org.guardianproject.Development.";
-const ERROR_PROBE_INTERFACE: &str = "org.guardianproject.Development.ErrorProbe1";
-const ERROR_PROBE_PATH: &str = "/org/guardianproject/Development/ErrorProbe1";
+    include_str!("../../../dbus/interfaces/io.github.cliffthelin.Guardian1.xml");
+const GUARDIAN_INTERFACE_PREFIX: &str = "io.github.cliffthelin.";
+const ERROR_PROBE_INTERFACE: &str = "io.github.cliffthelin.ErrorProbe1";
+const ERROR_PROBE_PATH: &str = "/io/github/cliffthelin/ErrorProbe1";
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct AnnotationContract {
@@ -71,7 +71,7 @@ struct ErrorProbe {
     message: &'static str,
 }
 
-#[zbus::interface(name = "org.guardianproject.Development.ErrorProbe1")]
+#[zbus::interface(name = "io.github.cliffthelin.ErrorProbe1")]
 impl ErrorProbe {
     fn representative_failure(&self) -> Result<(), GuardianDbusError> {
         Err(GuardianErrorCategory::ProviderChanged.with_message(self.message))
@@ -338,7 +338,7 @@ fn assert_p0_dbus_004_representative_typed_error_crosses_private_bus(connection:
         .unwrap_err();
     assert_eq!(
         method_error_name(&error),
-        "org.guardianproject.Development.Guardian1.Error.ProviderChanged"
+        "io.github.cliffthelin.Guardian1.Error.ProviderChanged"
     );
 }
 
@@ -422,16 +422,15 @@ fn p0_dbus_001_through_005_live_private_bus_contract_suite() {
 }
 
 fn assert_annotation_parser_preserves_presence_and_value() {
-    let without = Document::parse(
-        r#"<node><interface name="org.guardianproject.Development.Guardian1"/></node>"#,
-    )
-    .unwrap();
+    let without =
+        Document::parse(r#"<node><interface name="io.github.cliffthelin.Guardian1"/></node>"#)
+            .unwrap();
     let first = Document::parse(
-        r#"<node><interface name="org.guardianproject.Development.Guardian1"><annotation name="org.example.Contract" value="first"/></interface></node>"#,
+        r#"<node><interface name="io.github.cliffthelin.Guardian1"><annotation name="org.example.Contract" value="first"/></interface></node>"#,
     )
     .unwrap();
     let changed = Document::parse(
-        r#"<node><interface name="org.guardianproject.Development.Guardian1"><annotation name="org.example.Contract" value="changed"/></interface></node>"#,
+        r#"<node><interface name="io.github.cliffthelin.Guardian1"><annotation name="org.example.Contract" value="changed"/></interface></node>"#,
     )
     .unwrap();
 
