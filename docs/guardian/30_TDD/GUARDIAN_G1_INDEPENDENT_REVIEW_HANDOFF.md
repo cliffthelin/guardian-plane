@@ -42,11 +42,14 @@ a real authorization bypass waiting to happen, not a cosmetic contract slip.
 - Is the authorization subject actually derived from the real D-Bus system-bus unique connection name, or from something the client can influence?
 - Does any code path read a client-supplied UID, PID, username, role, or `is_admin`-equivalent field and let it affect the authorization outcome, even as a fallback or default?
 - Is there a real test (not just a unit test against a mock) that sends a forged identity field over an actual connection and proves it has zero effect?
+- Per G1 handoff §8: is caller identity re-resolved from the current message/connection on every call, with no cross-call caching of a unique-name → identity mapping? Does a disconnect/reconnect or bus-name owner change genuinely invalidate any prior resolved identity, rather than being untested?
 
-## Denial behavior
+## Denial behavior and error mapping
 
 - When a decision is denied, is the test-provider's state verified unchanged (not merely "the call returned an error")?
-- Could a partial side effect occur before the denial is evaluated? (Validate-then-authorize ordering matters — GP-05/GP-06.)
+- Could a partial side effect occur before the denial is evaluated? (Validate-then-authorize ordering matters — GP-05/GP-06, and is now a hard invariant in G1 handoff §7: resolve caller → validate → authorize → only then mutate.) Does at least one test exercise this exact ordering directly, not just compare before/after state that a buggy mutate-then-rollback implementation could also pass?
+- Does the implementation follow the G1 handoff §6 error mapping exactly: explicit denial → `NotAuthorized`; authentication mechanism unavailable → `AuthenticationUnavailable`; background/non-interactive request blocked from prompting → `NotAuthorized` (with internal reason metadata, not a new public error); spoofed-but-ignored identity data → no error by itself; provider/system failure → the corresponding existing category, never disguised as an authorization outcome?
+- Was any new public D-Bus error category introduced for G1? If so, does the completion report show the existing 17 categories were genuinely insufficient, per handoff §6's instruction to report the gap rather than add one unilaterally?
 
 ## Interactive vs. non-interactive
 

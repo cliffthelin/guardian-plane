@@ -26,14 +26,33 @@ check this implies.
 ## Validated commit and tag
 
 ```text
-Validated commit:  e54f475909fa7957c424560c77fd21c8b80bb36a
-G0 tag:            phase0-g0-public-contracts (annotated, points to e54f475)
+Validated commit:  15cdb787f99b4374f08a4c6bd3fe570f07f74960
+G0 tag:            phase0-g0-public-contracts (annotated, points to 15cdb78)
 ```
 
-`e54f475` adds only the independent audit report on top of `d85e374` (the namespace
-finalization commit). It is the tag target rather than `d85e374` because it is the
-first commit that carries the final independent audit evidence alongside the
-permanent-namespace implementation.
+`15cdb78` adds only the independent audit report on top of `2103f94` (the namespace
+finalization commit, current-main lineage). It is the tag target rather than `2103f94`
+because it is the first commit that carries the final independent audit evidence
+alongside the permanent-namespace implementation.
+
+### Tag re-anchoring note
+
+When this repository was first pushed to GitHub, `git pull --rebase origin main`
+replayed the entire local history onto GitHub's auto-created `README.md` commit,
+producing new commit objects for everything with the same content and messages but
+different hashes. The `phase0-g0-public-contracts` tag had already been pushed
+against the pre-rebase commit (`e54f475909fa7957c424560c77fd21c8b80bb36a`), which
+left the tag with no common ancestor with `main`.
+
+The tag was subsequently re-anchored to `15cdb78`, the content-identical
+current-main-lineage equivalent (verified: the only diff between `e54f475` and
+`15cdb78` is the pre-existing `README.md`; `HEAD` descends from `15cdb78`). The
+original pre-rebase lineage remains fully resolvable under the archival tag
+`g0-pre-rebase-lineage`, which points at the original `e54f475`. Historical G0
+evidence reports written against the pre-rebase hashes (`1ab7a47`, `6117715`,
+`7cbb262`, `3de9f1e`, `d85e374`, `e54f475`) are unchanged and remain accurate
+statements of what happened at the time; those hashes resolve via
+`g0-pre-rebase-lineage` rather than via `main`.
 
 ## Final audit verdict
 

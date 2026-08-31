@@ -5,7 +5,7 @@
 **Scope:** **G1 — Identity & Authorization** only  
 **Stop condition:** G1 evidence/report complete. Do **not** begin G2, privilege topology, provider work, transactions, clients, or packaging.  
 **Governing contract:** `docs/guardian/30_TDD/GUARDIAN_PHASE_0_1_TDD_CONTRACT.md`  
-**Prerequisite:** G0 tagged at `phase0-g0-public-contracts` (commit `e54f475909fa7957c424560c77fd21c8b80bb36a`). Confirm this tag exists and `HEAD` descends from it before starting.
+**Prerequisite:** G0 tagged at `phase0-g0-public-contracts` (commit `15cdb787f99b4374f08a4c6bd3fe570f07f74960`). Confirm this tag exists and `HEAD` descends from it before starting.
 
 ---
 
@@ -74,7 +74,12 @@ Do not start provider, transaction, GUI, TUI, indicator, or recovery implementat
 
 - Any real privileged system-management action (storage, sessions, services, resources, USB, logs).
 - Provider Arbitrator, Capability Registry, transaction engine, event/incident model.
-- G2 privilege-topology prototypes (Model A / Model B) beyond what is strictly needed to host the G1 test actions.
+- G2 privilege-topology prototypes (Model A / Model B). G1 must reuse the existing
+  `guardian-daemon` process and current G0 execution model for the bounded G1
+  authorization test surface. G1 must not choose, compare, prototype, or implement
+  the eventual privilege-topology split — that decision belongs exclusively to G2.
+  If minor test-only process setup is genuinely necessary, it must not become a
+  production privilege-topology decision.
 - GUI/TUI/CLI/indicator clients.
 - Packaging, systemd unit hardening review (that is G2 §24).
 - Changing the 17-error taxonomy or the two-method `Guardian1` public surface established in G0. If G1 needs new D-Bus surface (e.g., to expose the test actions), it must be additive within `Guardian1` or a clearly separate, clearly test-scoped interface — do not renumber or break the G0 contract.
@@ -156,7 +161,96 @@ tests remain unproven and why — do not report G1 complete on Layer 1 alone.
 
 ---
 
-# 6. Privilege rules that apply directly to this batch
+# 6. Authorization-outcome error mapping
+
+G1 must not invent public error semantics. Every authorization outcome maps to one
+of the 17 existing `GuardianDbusError` categories (`crates/guardian-core/src/error.rs`).
+Do not add a new public error category unless this mapping proves the existing
+taxonomy genuinely cannot express a required outcome — if that happens, stop and
+report the gap rather than adding one unilaterally.
+
+**Authorization explicitly denied**
+Examples: polkit returns a definitive denial; the caller is authenticated/known but
+lacks permission for the requested action.
+Return: `NotAuthorized`.
+
+**Authentication mechanism unavailable**
+Examples: interactive authentication is legitimately allowed for this request, but
+no usable authentication mechanism/agent is available; polkit cannot provide the
+required authentication path.
+Return: `AuthenticationUnavailable`.
+
+**Background/non-interactive request cannot prompt**
+A background/non-interactive request that would require interactive authentication
+must never open graphical authentication, never open text authentication, and fail
+closed instead.
+Return: `NotAuthorized`, with structured internal/reason metadata distinguishing
+`interaction-required-but-disallowed` (or an equivalent internal reason) from an
+ordinary denial. The *public* error stays `NotAuthorized` for this condition during
+G1 — do not add a new public D-Bus error solely to distinguish it; the reason
+explains why.
+
+**Invalid/spoofed identity data supplied by client**
+Client-supplied UID/PID/username/role fields never establish identity. If such data
+is merely present and ignored because identity is derived from the real D-Bus
+caller, authorization proceeds normally using the true caller — this is not an
+error condition by itself. If the request format itself violates a typed method
+contract (malformed/wrong-typed arguments), use the existing request-validation
+behavior for that (e.g. `InvalidRequest`) rather than treating the spoofed identity
+data as if it were authoritative or as a special error case.
+
+**Provider/system failure**
+Do not misreport provider, transport, or internal failures as authorization
+denials. Use the existing corresponding typed error category (e.g.
+`ProviderUnavailable`, `Internal`) so a real failure is never disguised as a
+security decision, and a security decision is never disguised as a transient fault.
+
+---
+
+# 7. Authorization-before-mutation ordering (hard invariant)
+
+G1's test actions must follow this order, with no exceptions:
+
+```text
+receive request
+→ resolve actual D-Bus caller
+→ validate request/preconditions needed for authorization
+→ perform authorization decision
+→ only if authorized may the bounded test mutation/action execute
+```
+
+A denied or unavailable authorization result must produce **zero provider mutation**
+and **zero system mutation** — not a mutation followed by a rollback, and not a
+side effect (including logging a state change, not just an audit-trail entry)
+that occurs before the authorization decision is reached. `P0-AUTH-002` must prove
+this ordering directly, not merely prove that the end state matches the start
+state by coincidence of a mock's implementation. Do not rely solely on the
+independent-review handoff to catch a mutation-before-authorization bug — this
+ordering is a requirement of the implementation itself, not just a review
+checklist item.
+
+---
+
+# 8. Caller-identity lifetime and staleness
+
+- Authorization identity is resolved from the caller associated with the *current*
+  D-Bus message/connection, at the time of that call — never cached from an earlier
+  call and reused.
+- Guardian must not cache a D-Bus unique-name → identity relationship beyond the
+  lifetime/context in which it is valid.
+- A disconnect/reconnect, or a bus name owner change, invalidates any stale
+  caller-identity state; a subsequent call must re-resolve identity from the bus,
+  not from memory.
+- Client-supplied identity data never repairs or replaces stale bus identity — if
+  the resolved caller identity is stale or unavailable, the request fails closed
+  (see §6), it does not fall back to anything the client supplied.
+
+This is a G1 identity-correctness rule, not a G2 privilege-topology decision — it
+does not require deciding how the daemon process itself is structured.
+
+---
+
+# 9. Privilege rules that apply directly to this batch
 
 From AGENTS.md, restated because G1 is where they first bite:
 
@@ -167,14 +261,15 @@ From AGENTS.md, restated because G1 is where they first bite:
 
 ---
 
-# 7. Completion report
+# 10. Completion report
 
 Follow the AGENTS.md "Completion report" structure (governing scope; files changed;
 tests; evidence; contract compliance; git state), plus:
 
 - explicit P0-AUTH-001..005 pass/fail/not-yet-proven table;
 - which tests ran on this workstation (Layer 1) vs. in the disposable VM (Layer 2);
-- if any Layer 2 test could not be run, say so plainly rather than reporting G1 complete.
+- if any Layer 2 test could not be run, say so plainly rather than reporting G1 complete;
+- confirmation that the §6 error mapping, §7 ordering invariant, and §8 identity-lifetime rule were followed, with the specific test(s) that prove each.
 
 Do not tag a G1 milestone yourself. Stop and hand off for independent review per
 `docs/guardian/30_TDD/GUARDIAN_G1_INDEPENDENT_REVIEW_HANDOFF.md`.
