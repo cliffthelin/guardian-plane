@@ -59,7 +59,7 @@ this gate, not a pass with caveats.
   than guessed?
 - Does the inventory actually drive the capability-bounding decisions for
   both models, or is it decorative?
-- Where a capability area is classified `D-Bus authorization only`, was it
+- Where a capability area is classified `Guardian polkit authorization`, was it
   checked whether the underlying provider actually performs its own
   authorization (making it `provider-owned authorization`, needing no
   Guardian privilege at all), rather than defaulting to the more privileged
@@ -174,6 +174,9 @@ FAIL — CONTRACT VIOLATION
 FAIL — PRIVILEGE EVIDENCE INSUFFICIENT
 FAIL — SCOPE LEAK
 FAIL — PRESELECTED TOPOLOGY
+FAIL — GENERIC PRIVILEGED BROKER
+FAIL — CONFUSED-DEPUTY BOUNDARY UNSAFE
+FAIL — PRIVILEGE CREEP
 ```
 
 `FAIL — PRIVILEGE EVIDENCE INSUFFICIENT` applies whenever real host/systemd
@@ -185,6 +188,25 @@ same rigor.
 `FAIL — PRESELECTED TOPOLOGY` applies when the comparison reads as
 justification for a conclusion reached before both models were fairly
 built and measured.
+
+`FAIL — GENERIC PRIVILEGED BROKER` applies when any helper (or daemon)
+method — regardless of name — accepts an argument shape that lets a caller
+reach an arbitrary filesystem path, sysfs/procfs node, D-Bus destination,
+provider name with an opaque payload, or action name whose implementation
+isn't closed and typed. Use this specific verdict rather than folding it
+into `FAIL — CONTRACT VIOLATION`, so the failure class is unambiguous.
+
+`FAIL — CONFUSED-DEPUTY BOUNDARY UNSAFE` applies when a Model B helper
+trusts a caller-identity or authorization claim forwarded by the core
+instead of independently resolving and authorizing, or when a TOCTOU window
+exists between the core's decision and the helper's apply that the
+implementation did not close.
+
+`FAIL — PRIVILEGE CREEP` applies when the individually-justified
+capabilities/hardening-exceptions/writable-paths, taken together, amount to
+something functionally close to unrestricted access for the selected
+model — even if every individual item was properly documented (implementation
+handoff §12, "Privilege creep is an architectural signal").
 
 ## Blocking findings
 
@@ -244,6 +266,22 @@ or code that settles it, not a general assurance:
     method's *argument shape* lets a caller reach anywhere in the
     filesystem/device tree/D-Bus namespace it wants merely by varying an
     argument.
+14. Is any capability area classified `provider-owned authorization`
+    (needing no Guardian privilege at all) actually double-checked against
+    the provider's real D-Bus interface, or is it asserted without
+    verifying the provider genuinely performs its own authorization? The
+    reverse error also counts: is an area that's genuinely provider-owned
+    incorrectly classified as needing Guardian-held privilege, inflating
+    the measured privilege requirement for one or both models?
+15. If a core-to-helper (or equivalent split) request is retried after a
+    timeout — because the core never received the helper's acknowledgment —
+    could the helper apply the same mutation twice? Is this risk assessed
+    even though full idempotency-key handling belongs to G4?
+16. After a restart of either component, could both processes end up
+    believing they hold write authority for the same capability
+    simultaneously — distinct from whether a restart merely spawns a
+    second writer process? Does write-authority state get re-derived on
+    restart, or does it persist unsafely across one?
 
 ## Test-quality audit
 

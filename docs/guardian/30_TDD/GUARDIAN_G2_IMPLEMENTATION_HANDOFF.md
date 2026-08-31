@@ -145,7 +145,7 @@ provider-owned authorization — Guardian calls another already-authoritative
     privileged service that performs its own authorization (e.g. UDisks'
     PowerOff() does its own polkit check internally); Guardian itself needs
     no elevated privilege for this area beyond being an ordinary D-Bus client
-D-Bus authorization only — Guardian's own method is polkit-gated, but the
+Guardian polkit authorization — Guardian's own method is polkit-gated, but the
     underlying action requires no further OS-level privilege once authorized
 specific device/file access
 specific Linux capability
@@ -154,13 +154,13 @@ unknown — requires host research
 ```
 
 The `provider-owned authorization` category matters and is not
-interchangeable with `D-Bus authorization only`: many "system-management"
+interchangeable with `Guardian polkit authorization`: many "system-management"
 capability areas may turn out to need *zero* privilege from Guardian at
 all, because the authoritative provider already gates the write itself.
 Conflating the two categories would understate how many areas can avoid
 elevating Guardian's own process, in either model. Check each provider's
 actual D-Bus interface for its own authorization annotations/behavior
-before defaulting to `D-Bus authorization only`.
+before defaulting to `Guardian polkit authorization`.
 
 Cover at minimum, from TDD contract §26 and the broader capability areas
 named in the governing research:
@@ -232,6 +232,15 @@ disposable VM. Evaluate, with real evidence:
   than the inventory in §5 justifies?
 - Transaction/rollback implications (§17 below).
 - Operational simplicity and recovery behavior (§18 below).
+- Observability: can an operator/reviewer tell, from logs/journal/D-Bus
+  introspection alone, what the daemon is doing and why a request was
+  denied — or does diagnosing a problem require attaching a debugger?
+- Testability: how much of this model's behavior can Layer 1 (private-bus,
+  mocked) tests actually exercise versus requiring the VM every time?
+- Future extension cost: when a later gate needs a new privileged
+  operation, does adding it to this model require touching hardening/
+  capability configuration again, or does the existing boundary already
+  accommodate it?
 
 ## Model A required real evidence
 
@@ -287,6 +296,15 @@ unprivileged core, in the disposable VM. Evaluate, with real evidence:
   the core has crashed, or vice versa?
 - Auditability: can a transaction/incident record unambiguously attribute
   an action to a real caller through both hops?
+- Observability: can an operator/reviewer distinguish "core denied it,"
+  "helper denied it," and "helper was unreachable" from logs alone, or does
+  the two-process split obscure which component made which decision?
+- Testability: how much of the confused-deputy and authorization-boundary
+  behavior can Layer 1 mocked tests actually cover versus requiring the VM?
+- Future extension cost: does adding a new privileged operation later mean
+  extending the helper's typed surface (bounded, reviewable) or does it
+  pressure the design toward a broader/more generic method to avoid
+  repeating the helper's setup cost?
 
 ## Model B required real evidence
 
@@ -295,7 +313,8 @@ unprivileged core, in the disposable VM. Evaluate, with real evidence:
 - Real `systemd-analyze security` output for the helper unit.
 - Real proof the helper performs its own `CheckAuthorization` against real
   polkit using the real caller identity — not a value forwarded by the core
-  (§14/§15, and adversarial question 1–2 in §26 of the review handoff).
+  (§14/§15, and adversarial questions 1–2 in the review handoff's
+  "Adversarial question audit" section).
 - Real capability set tested for the helper, same rigor as Model A.
 
 ## Explicitly forbidden in Model B (and Model A)
@@ -351,7 +370,19 @@ extra hop:
 - Is there a TOCTOU window between the core's decision and the helper's
   apply — e.g., could the caller's authorization be revoked or the caller
   disconnect between the two hops in a way that leaves the helper acting on
-  stale authority?
+  stale authority? Concretely: if the helper independently re-resolves and
+  re-authorizes per G1's identity-lifetime rule (§8 above), this window
+  should already be closed by construction — confirm that in the analysis
+  rather than asserting it.
+- What happens on a duplicate or retried request — e.g. the core times out
+  waiting for the helper's acknowledgment and retries, but the helper's
+  first apply actually succeeded? Does the design risk a double-apply, and
+  is that risk assessed even though full idempotency-key handling is G4's
+  job (TDD contract §9.3), not G2's to implement?
+- Is authorization, once obtained at one hop, still verifiably valid at the
+  moment the other hop actually mutates state — or could it be presented
+  as valid there without ever having been independently checked at that
+  specific hop?
 - Never forward `uid`, `username`, or `authorized=true` from the
   unprivileged core to the helper and trust it. This is the exact
   client-supplied-identity problem G1 solved at the client/daemon boundary;
@@ -398,6 +429,12 @@ answer — without implementing G4 — for each model:
 - What happens if the helper crashes after `Apply` but before acknowledging
   the core?
 - What happens if the core dies while the helper is mid-mutation?
+- After a restart of either component (systemd `Restart=` firing, a manual
+  restart, or a crash-and-recover cycle), do both the core and the helper
+  believe they hold write authority for the same capability simultaneously
+  — a distinct question from "does a restart spawn two writer processes,"
+  since a single surviving process pair can still both believe they are
+  the authoritative writer if that state isn't reset/re-derived on restart.
 
 ---
 
@@ -630,8 +667,11 @@ Context
 Decision drivers
 Model A (description, evidence, measurements)
 Model B (description, evidence, measurements)
-Security comparison
-Operational comparison
+Security comparison (least privilege, attack surface, confused-deputy risk,
+    sandboxability — named per model, not left implicit)
+Operational comparison (provider compatibility, recovery behavior,
+    observability, testability, packaging complexity, future extension
+    cost — named per model, not left implicit)
 Capability requirements (the §5 inventory, referenced or embedded)
 systemd hardening evidence (§11 table)
 D-Bus/polkit implications (§8/§9 findings)
