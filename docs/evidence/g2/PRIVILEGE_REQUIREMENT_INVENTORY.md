@@ -21,9 +21,21 @@ root/system privilege           — no narrower alternative found/researched
 unknown — requires host research
 ```
 
+Classifications below are **mutually exclusive per row**: read and write
+(or otherwise privilege-distinct) operations within one capability area are
+split into separate rows rather than given a combined/dual classification,
+so the summary counts can be computed by simple addition without
+double-counting. This table was corrected during G2 audit-findings closure
+after the independent reviewer found the previous version's row count (23)
+did not reconcile with its own claimed summary total (20), that
+`NetworkManager` was classified twice within a single row, and that the
+`systemd (read unit state)` row's classification conflicted with its own
+justification text. Both are fixed below; no row's underlying research
+conclusion changed, only how it is recorded.
+
 | Capability area | Classification | Basis |
 |---|---|---|
-| systemd/service management (read unit state) | Guardian polkit authorization | `org.freedesktop.systemd1` read methods (`ListUnits`, `GetUnit`) require no special privilege beyond the system bus; systemd's own polkit actions gate *write* operations (start/stop/restart) at the provider — those specific writes are **provider-owned authorization**, not Guardian-held privilege, since systemd1 itself performs the polkit check. |
+| systemd/service management (read unit state) | no privilege | `org.freedesktop.systemd1` read methods (`ListUnits`, `GetUnit`) require no special privilege beyond the system bus — this is why the row is classified `no privilege`, not `Guardian polkit authorization` (a prior version of this table misclassified it against this same justification text). |
 | systemd/service management (start/stop/restart units) | provider-owned authorization | `org.freedesktop.systemd1.Manager` methods are already polkit-gated by systemd itself (`org.freedesktop.systemd1.manage-units` etc.); a correctly-implemented Guardian adapter calls systemd's own D-Bus API and lets systemd perform its own authorization. Guardian needs no elevated privilege for this — only permission to call the D-Bus method, which is itself polkit-mediated by the provider. |
 | cgroups (resource limits, transient scopes) | provider-owned authorization | Transient scope/slice creation goes through `systemd1.Manager.StartTransientUnit`, which is provider-owned per above. Direct cgroupfs writes (bypassing systemd) would require **specific device/file access** or **root/system privilege** — Guardian should not do this; TDD contract §17 requires using systemd's transient-unit API, not hand-written cgroup writes. |
 | PSI (`/proc/pressure/*`) | no privilege | World-readable on stock Ubuntu 26.04.1 for the "some"/"full" pressure lines; the trigger-registration mechanism (`poll()` on an fd from `open()` with a written trigger spec) is also unprivileged for unprivileged monitors, per kernel PSI docs, though the kernel imposes an additional resource-use constraint on unprivileged triggers (TDD contract §16 research). No capability needed. |
@@ -37,7 +49,8 @@ unknown — requires host research
 | UPower (battery/UPS/power devices) | no privilege | `org.freedesktop.UPower` read surface is unprivileged. |
 | NVML/NVIDIA | unknown — requires host research | Deferred; no NVIDIA hardware available in the disposable VM images used this pass. |
 | fwupd | unknown — requires host research | Deferred per TDD contract §28; `org.freedesktop.fwupd`'s write methods were not inspected this pass. |
-| NetworkManager | provider-owned authorization (for writes); no privilege (for reads) | NetworkManager's own D-Bus API performs its own polkit checks (`org.freedesktop.NetworkManager.*` actions) for configuration changes, including its checkpoint/rollback API (TDD contract §9 research). Reads are unprivileged. |
+| NetworkManager (read state/topology) | no privilege | NetworkManager's read surface is unprivileged; any bus client may query it. |
+| NetworkManager (configuration writes, including checkpoint/rollback) | provider-owned authorization | NetworkManager's own D-Bus API performs its own polkit checks (`org.freedesktop.NetworkManager.*` actions) for configuration changes, including its checkpoint/rollback API (TDD contract §9 research). |
 | journald (read) | no privilege | Reading the journal via `sd-journal`/`journalctl` as a member of `systemd-journal` group, or via unprivileged read where permitted, requires no elevated privilege; exact group membership needs is a packaging detail, not a process-privilege one. |
 | journald (rotation/capacity policy) | unknown — requires host research | journald's own capacity limits are config-file-driven, not D-Bus-writable in the versions inspected during the original research pass; whether Guardian would need file-write privilege to `/etc/systemd/journald.conf.d/` or an equivalent was not re-verified this pass. Deferred. |
 | AccountsService (read session list) | no privilege | `org.freedesktop.Accounts` read properties are unprivileged. |
@@ -49,9 +62,13 @@ unknown — requires host research
 
 ## Summary counts
 
+Computed directly from the 24 rows above; the categories are mutually
+exclusive per row (read/write splits absorb what would otherwise be dual
+classifications), so this total is a simple sum, not an approximation:
+
 ```text
-Total capability areas classified:        20
-no privilege:                              8
+Total capability areas classified:        24
+no privilege:                              9
 provider-owned authorization:              6
 Guardian polkit authorization:             1
 specific device/file access:               0
@@ -62,6 +79,8 @@ unknown — requires host research:          8 (BPF/eBPF, thermald-write, NVML,
                                               apt/package state, generic
                                               hardware control, usbguard)
 ```
+
+`9 + 6 + 1 + 0 + 0 + 0 + 8 = 24`, matching the row count.
 
 ## What this inventory means for the topology comparison
 

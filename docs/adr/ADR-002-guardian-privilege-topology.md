@@ -32,15 +32,17 @@ the governing handoff.
 
 ## Privilege Requirement Inventory summary
 
-Full detail: `docs/evidence/g2/PRIVILEGE_REQUIREMENT_INVENTORY.md`. Of 20
-capability areas classified: 8 need no privilege, 6 are provider-owned
-authorization (the provider — UDisks, systemd1, NetworkManager,
-AccountsService — performs its own polkit check; Guardian needs no
-elevated privilege), 1 is Guardian's own bounded polkit-gated action
-(matching the G2 test operation), and 8 are honestly marked unknown pending
-further research (BPF/eBPF, thermald writes, NVML, fwupd, journald
-rotation, apt/package state, generic hardware control, usbguard). **No
-capability area researched this pass demonstrably requires Guardian to hold
+Full detail: `docs/evidence/g2/PRIVILEGE_REQUIREMENT_INVENTORY.md`. Of 24
+capability areas classified (read/write split into separate rows where
+their privilege models differ, so counts are additive and mutually
+exclusive): 9 need no privilege, 6 are provider-owned authorization (the
+provider — UDisks, systemd1, NetworkManager, AccountsService — performs
+its own polkit check; Guardian needs no elevated privilege), 1 is
+Guardian's own bounded polkit-gated action (matching the G2 test
+operation), and 8 are honestly marked unknown pending further research
+(BPF/eBPF, thermald writes, NVML, fwupd, journald rotation, apt/package
+state, generic hardware control, usbguard). **No capability area
+researched this pass demonstrably requires Guardian to hold
 root or a broad Linux capability for its own sake** — the root requirement
 found below comes from a different source entirely (see next section).
 
@@ -114,10 +116,23 @@ this gate exists to prevent. **The topology actually built and measured:**
 clients call the helper *directly* for the bounded write; `core` is never
 in the write path, and has no code path capable of relaying one.
 
-**Helper contract:** `AttemptBoundedWrite(in b interactive)` —  confirmed
-via live `gdbus introspect` against the real running service, not a code
-read. Exactly one input argument, a boolean. No path, no uid, no argv, no
-opaque payload, no claimed-identity field anywhere in the interface.
+**Helper contract:** confirmed via live `gdbus introspect` against the real
+running service (`docs/evidence/g2/model-b/helper-live-introspection.txt`),
+not a code read. Two classes of method:
+
+- **Privileged operation:** `AttemptBoundedWrite(in b interactive)` — the
+  sole method that performs the bounded mutation. Exactly one input
+  argument, a boolean. No path, no uid, no argv, no opaque payload, no
+  claimed-identity field anywhere in the interface.
+- **Test/observability-only:** `MutationCount(out u)` and
+  `LastOrderingTrace(out as)` — output-only accessors that let the Layer 1
+  and Layer 2 evidence prove ordering (`received → identity_resolved →
+  validated → authorized_checked → mutation_applied`) and mutation count.
+  They perform no privileged mutation and expose no caller-controlled
+  input. These exist to make G2's evidence verifiable; they are prototype
+  instrumentation, not a claim about what belongs in a production helper's
+  public API, and are not automatically carried forward as permanent
+  surface.
 
 **Privileges:** `core` — `User=svc-model-b-core` (uid 997), empty
 `CapabilityBoundingSet=`, plus `PrivateUsers=yes` (safe to add here
@@ -171,7 +186,7 @@ D-Bus policy iteration was needed mid-session — see
 | IPC exposure | one D-Bus name | two D-Bus names, two policy surfaces |
 | Serialization/parser exposure | one interface's worth | two interfaces' worth (though `core`'s is trivially small — one read method) |
 | Sandboxability (measured) | 1.1 OK | 0.6 SAFE (core) / 1.1 OK (helper) |
-| Provider compatibility | unaffected either way — 6/20 areas are provider-owned regardless of topology | same |
+| Provider compatibility | unaffected either way — 6/24 areas are provider-owned regardless of topology | same |
 | Transaction compatibility | see below | see below |
 | Failure containment | see below | see below |
 | Recovery behavior | untested this pass (helper's identical evidence stands in) | real: ~2s auto-restart, new identity, in-memory state resets |
@@ -319,8 +334,24 @@ future feature the way Model A's structural cost does.
   authorization mechanism than real polkit `CheckAuthorization`, which is
   out of scope to redesign here.
 - Clients must be able to reach both `guardian-core` (reads) and
-  `guardian-helper` (writes) directly on the system bus; no client-facing
-  API may imply a relay through `guardian-core` for privileged operations.
+  `guardian-helper` (writes) directly on the system bus. The security
+  invariant this protects is narrower than "core is never involved in a
+  write": **`guardian-helper` must never depend on `guardian-core`
+  forwarding the client's identity or authorization claim.** The helper
+  must always independently resolve the real caller from its own inbound
+  D-Bus connection and independently perform the required polkit
+  authorization immediately before mutation — regardless of what else it
+  consults. What is forbidden is a relay of *client identity/authorization
+  authority* through core (`core` says `uid=1000, authorized=true` →
+  `helper` trusts it); a future `helper → core` consultation for
+  non-authoritative coordination (e.g. Provider Arbitrator ownership,
+  single-writer state, transaction context, capability/observation state)
+  is not foreclosed by this decision, provided `core`'s response is never
+  treated as establishing caller identity, authorization, or privileged
+  authority — the helper remains solely responsible for validating
+  whatever conditions must hold immediately before its own mutation. This
+  distinction is architectural guidance for G3/G4, not an implementation
+  of Provider Arbitrator or transaction coordination now.
 - G3's Capability Registry, Provider Arbitrator, and later gates' PSI event
   engine, Diagnostic Budget, Flight Recorder, and Event/Incident model
   belong in `guardian-core`, not `guardian-helper`, consistent with this

@@ -76,6 +76,32 @@ No hardening directive was disabled to make a test pass — every directive
 present in the final unit was added because it worked, never removed
 because it didn't.
 
+**Evidence-trail note (added during G2 audit-findings closure):** the
+committed `model-a/journal-transcript.txt` preserves the original mistake
+honestly — the first attempt at adding the round-2 directives placed them
+after `[Service]`'s content but before `[Install]`'s own keys were
+re-declared incorrectly, and systemd logged `Unknown key '...' in section
+[Install], ignoring` for all seven directives across two separate
+daemon-reload/restart cycles visible in that transcript, meaning that
+transcript never shows an explicit "reload succeeded with zero warnings"
+line for the corrected file. The intermediate corrected-reload/restart
+terminal output itself was not preserved as its own logged transcript
+entry. This is stated plainly rather than implied to exist. However, the
+final round-2 result is independently and directly tied to the corrected
+active unit by two pieces of evidence that do not depend on that missing
+transcript line: (1) the committed `model-a/guardian-model-a.service` has
+all seven round-2 directives correctly placed inside `[Service]`, not
+`[Install]`; (2) `model-a/model-a-security-round2.txt` shows all seven of
+those directives individually evaluated and marked `✓` active with their
+correct (non-degraded) descriptions — e.g. `✓ ProtectClock= Service cannot
+write to the hardware clock or system clock` rather than round 1's `✗
+ProtectClock= Service may write to the hardware clock or system clock
+0.2` — which `systemd-analyze security` can only report if it queried the
+corrected, successfully-loaded unit. No substantive uncertainty exists
+about whether the 1.1 score reflects the corrected unit; only the
+transcript's specific "the reload happened cleanly" line was not
+separately captured. A VM rerun was judged unnecessary for this reason.
+
 ## Real capability set (process evidence, not declared configuration)
 
 ```text
