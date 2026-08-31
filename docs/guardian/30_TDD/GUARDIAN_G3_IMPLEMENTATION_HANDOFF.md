@@ -95,8 +95,10 @@ Then stop.
 8. `docs/evidence/g2/G2_MILESTONE.md` and
    `docs/evidence/g2/PRIVILEGE_REQUIREMENT_INVENTORY.md` — the concrete
    classifications G3's data model must express without loss across
-   **two separate dimensions**: authorization ownership (`authorization_mode`)
-   and privilege/access requirement (`privilege_requirement`) — see §5.
+   **two separate dimensions**: authorization ownership
+   (`authorization_ownership`, wrapping the `AuthorizationMode` enum in an
+   explicit known/unknown state) and privilege/access requirement
+   (`privilege_requirement`) — see §5.
 
 ---
 
@@ -176,11 +178,12 @@ adversarial question §39.8/§39.9 below).
 
 Per TDD contract §11, the canonical representation MUST contain at least
 the fields the contract lists. The contract's schema does not itself split
-authorization from privilege/access requirement into two named fields —
-that split is this handoff's requirement (§5 below), needed because a
-single `authorization_mode` field cannot losslessly represent the G2
-inventory (see the dimensional-separation discussion immediately below the
-field list):
+authorization from privilege/access requirement into two named fields, nor
+does it separate a known authorization architecture from not yet knowing
+one — both splits are this handoff's requirement (§5 below), needed
+because a single `authorization_mode` field cannot losslessly represent
+the G2 inventory (see the dimensional-separation discussion immediately
+below the field list):
 
 ```rust
 CapabilityRecord {
@@ -191,7 +194,8 @@ CapabilityRecord {
     health,
     read_support,
     write_support,
-    authorization_mode,       // Dimension A — who owns authorization (§5 below)
+    authorization_ownership,  // Dimension A — Knowledge<AuthorizationMode>: who owns
+                               // authorization, when that is established (§5 below)
     privilege_requirement,    // Dimension B — what OS privilege/access is required (§5 below)
     boot_availability,
     interface_kind,
@@ -218,31 +222,72 @@ already defines the value set:
   "can observe" structurally different from "can mutate," and both
   different again from "currently owns mutation" (that last one lives on
   `ArbitrationDecision.current_owner`, not here — see §7).
-- `authorization_mode` and privilege/access requirement are **two
+- Authorization ownership and privilege/access requirement are **two
   independent dimensions of `CapabilityRecord` and MUST be represented by
   two separate typed fields, never folded into one enum.** They answer two
   different questions, and the G2 inventory's own 24 rows prove neither
   question determines the other (see the worked example below) —
   collapsing them loses information the inventory took real research to
-  establish.
+  establish. Within Dimension A itself, *whether an `AuthorizationMode` is
+  even known yet* is a further, epistemic split — see below.
 
-  **Dimension A — `authorization_mode`: *who performs/owns authorization?***
-  A typed enum reflecting G2's established, audited distinction — do not
-  invent a fourth state without evidence, and do not collapse this into a
-  boolean:
+  **Dimension A — `authorization_ownership`: *who performs/owns
+  authorization, when that is actually known?*** `AuthorizationMode` itself is a governed
+  enum with **exactly three values** reflecting G2's established, audited
+  distinction — do not add a fourth value to this enum, including an
+  `Unknown` variant, unless the governing TDD contract is shown to require
+  that exact shape (none is currently known to):
   ```text
-  NoAuthorizationRequired          (G2 inventory: "no privilege" rows)
-  ProviderOwnedAuthorization       (G2 inventory: "provider-owned authorization" —
-                                     the provider itself performs its own polkit check;
-                                     Guardian needs no elevated privilege)
-  GuardianOwnedAuthorization       (G2 inventory: "Guardian polkit authorization" —
-                                     Guardian's own action is polkit-gated)
+  AuthorizationMode {
+      NoAuthorizationRequired,          (G2 inventory: "no privilege" rows)
+      ProviderOwnedAuthorization,       (G2 inventory: "provider-owned authorization" —
+                                          the provider itself performs its own polkit check;
+                                          Guardian needs no elevated privilege)
+      GuardianOwnedAuthorization,       (G2 inventory: "Guardian polkit authorization" —
+                                          Guardian's own action is polkit-gated)
+  }
   ```
-  This field MUST NOT answer "what OS privilege does this require?" and
+  This enum MUST NOT answer "what OS privilege does this require?" and
   MUST NOT mean "the current caller is authorized" — it describes the
-  capability's authorization *architecture*, nothing about a specific
-  caller or request (see §12 for why this distinction is a hard G2
-  boundary, not a style preference).
+  capability's authorization *architecture* when that architecture is
+  actually established, nothing about a specific caller or request (see
+  §12 for why this distinction is a hard G2 boundary, not a style
+  preference).
+
+  **`AuthorizationMode` is not the whole of Dimension A.** Whether
+  Guardian has even *established* which `AuthorizationMode` applies is a
+  separate, epistemic question — "do we know who owns authorization for
+  this capability yet?" — and G2's own inventory proves this question has
+  a real "not yet" answer for eight capability areas (see the correction
+  below). `CapabilityRecord`'s actual authorization-ownership field MUST
+  therefore wrap the three-value enum in an explicit knowledge state,
+  never let "unknown" collapse into one of the three architectural values:
+  ```rust
+  enum Knowledge<T> {
+      Known(T),
+      Unknown,
+  }
+
+  // CapabilityRecord field:
+  authorization_ownership: Knowledge<AuthorizationMode>,
+  ```
+  The exact Rust type/name is not prescribed — `Knowledge<AuthorizationMode>`,
+  a dedicated `AuthorizationOwnershipState` enum with `Known(AuthorizationMode)`/
+  `Unresearched` variants, or an equally explicit design are all acceptable.
+  A bare `Option<AuthorizationMode>` is acceptable **only** if `None` is
+  explicitly documented and serialized as "unknown/unresearched," and the
+  doc comment makes unmistakably clear that `None` is never to be read as
+  "no authorization required" — prefer a named wrapper over a bare
+  `Option` specifically because it makes that misuse structurally harder,
+  not just discouraged in prose.
+
+  **`Unknown`/`Unresearched` is epistemic, not a fourth authorization
+  architecture.** `AuthorizationMode::NoAuthorizationRequired` means
+  "Guardian has established that this capability needs no authorization."
+  `Knowledge::Unknown` (or equivalent) means "Guardian has not established
+  which of the three `AuthorizationMode` values applies." These are not
+  interchangeable, and code MUST NOT use one as shorthand for the other in
+  either direction.
 
   **Dimension B — a separate `privilege_requirement` field (or equivalent
   typed model): *what OS-level privilege/access does the operation
@@ -264,38 +309,52 @@ already defines the value set:
 
   **These two fields are genuinely independent — do not assume one
   determines the other.** Worked example directly from the G2 inventory:
-  `power-profiles-daemon (HoldProfile)` is `authorization_mode =
-  GuardianOwnedAuthorization` (Guardian's own polkit action gates it) but
-  its `privilege_requirement` is `NoDirectPrivilege` (no further OS
-  privilege is needed once authorized) — **`GuardianOwnedAuthorization`
-  does not imply `RootOrSystemPrivilege`.** Conversely, G2's own bounded
-  test operation demonstrates a case where `authorization_mode =
-  GuardianOwnedAuthorization` while the underlying privileged *helper
-  process* runs as root for the polkit trusted-caller reason (a fact about
-  process topology, not about this capability's own privilege
-  requirement) — do not conflate a capability's `privilege_requirement`
-  with the ambient privilege of whatever process happens to execute it
-  either; if that distinction matters for a specific capability, it must
-  be representable, not assumed away.
+  `power-profiles-daemon (HoldProfile)` is
+  `authorization_ownership = Known(GuardianOwnedAuthorization)` (Guardian's
+  own polkit action gates it) but its `privilege_requirement` is
+  `NoDirectPrivilege` (no further OS privilege is needed once authorized)
+  — **`GuardianOwnedAuthorization` does not imply `RootOrSystemPrivilege`.**
+  Likewise, `UDisks PowerOff` is
+  `authorization_ownership = Known(ProviderOwnedAuthorization)` with
+  `privilege_requirement = NoDirectPrivilege` — **`ProviderOwnedAuthorization`
+  does not imply `RootOrSystemPrivilege` either.** Conversely, G2's own
+  bounded test operation demonstrates a case where
+  `authorization_ownership = Known(GuardianOwnedAuthorization)` while the
+  underlying privileged *helper process* runs as root for the polkit
+  trusted-caller reason (a fact about process topology, not about this
+  capability's own privilege requirement) — do not conflate a capability's
+  `privilege_requirement` with the ambient privilege of whatever process
+  happens to execute it either; if that distinction matters for a specific
+  capability, it must be representable, not assumed away.
 
   `docs/evidence/g2/PRIVILEGE_REQUIREMENT_INVENTORY.md`'s 24 rows are a
   direct, ready-made fixture set for testing that every row is
   representable **without information loss across both dimensions** —
-  not that every row maps onto `authorization_mode` alone. Required test
-  coverage:
-  - all 9 `no privilege` rows preserve `authorization_mode =
-    NoAuthorizationRequired`;
-  - all 6 `provider-owned authorization` rows preserve `authorization_mode
-    = ProviderOwnedAuthorization`;
-  - the 1 `Guardian polkit authorization` row preserves `authorization_mode
-    = GuardianOwnedAuthorization`;
-  - all 8 `unknown — requires host research` rows remain unknown for
-    whichever dimension the inventory actually left unknown (the inventory
-    marks these unknown for *privilege/access requirement research*, not
-    for authorization ownership — most already have a known
-    `authorization_mode`; do not force an unknown row into a false known
-    state on either dimension, and do not force a known dimension into
-    `Unknown` just because a sibling dimension is unresearched);
+  not that every row maps onto `authorization_ownership` alone. **Correction
+  to an earlier draft of this handoff:** the inventory's 8
+  `unknown — requires host research` rows are recorded with a *single*
+  classification column, not a per-dimension breakdown — the inventory
+  does **not** establish a known `AuthorizationMode` for these 8 rows
+  (`BPF/eBPF`, `thermald (write policy)`, `NVML/NVIDIA`, `fwupd`,
+  `journald (rotation/capacity policy)`, `apt/package state`, `generic
+  hardware control`, `USB Security / usbguard`). Fixtures MUST NOT
+  manufacture a known authorization owner for these 8 rows from
+  architectural preference or general platform knowledge — they must map
+  to `authorization_ownership = Unknown` **and** `privilege_requirement =
+  Unknown` simultaneously, unless a specific row's own recorded evidence
+  text explicitly proves an authorization owner (none currently do; if a
+  future evidence-research pass proves one, update that row's mapping then,
+  not this handoff). Required test coverage:
+  - all 9 `no privilege` rows preserve `authorization_ownership =
+    Known(NoAuthorizationRequired)`;
+  - all 6 `provider-owned authorization` rows preserve
+    `authorization_ownership = Known(ProviderOwnedAuthorization)`;
+  - the 1 `Guardian polkit authorization` row preserves
+    `authorization_ownership = Known(GuardianOwnedAuthorization)`;
+  - all 8 `unknown — requires host research` rows map to
+    `authorization_ownership = Unknown` **and** `privilege_requirement =
+    Unknown` — both dimensions unknown, since the inventory proved neither
+    for these rows;
   - no row is forced into a false known state on either dimension merely
     because the fixture-building code found it convenient.
 
@@ -416,6 +475,17 @@ ArbitrationDecision {
    mechanically detectable, e.g. via a monotonic arbitration
    epoch/generation number or an equivalent. Do not build `VALIDATING` →
    `APPLYING` runtime transitions here.
+6. If arbitration is asked whether Guardian may write a capability whose
+   `authorization_ownership` is `Unknown` (§5/§10), the decision MUST fail
+   closed: `write_permitted = false`, exactly as for ambiguous ownership
+   (item 2) — unless the governing contract is shown to specify a
+   stricter or otherwise different representation. Unknown authorization
+   ownership is not evidence of safety; it is an open question, and an
+   open question about who may authorize a write must never be resolved
+   by defaulting to "yes." This is data-model/arbitration behavior only —
+   it must not become privileged authorization logic, and it does not
+   replace the privileged helper's own independent authorization at the
+   mutation boundary (§12).
 
 ## Determinism (governing brief §26/§27)
 
@@ -552,37 +622,52 @@ incompatible provenance type from scratch.
 # 10. Unknown handling (governing brief §28)
 
 Unknown is a valid state, not an error to paper over. But "unknown" means
-something different depending on which dimension is asking, and the two
-`CapabilityRecord` privilege/authorization fields from §5 must be treated
-according to their own specific rule, not one blanket rule:
+something different depending on which dimension — and, within Dimension
+A, which *kind* of unknown — is asking. Three distinct rules apply, not
+one blanket rule:
 
-**`authorization_mode` (Dimension A) — exactly three governed states, no
-wire-level fourth.** The runtime enum contains exactly
-`NoAuthorizationRequired | ProviderOwnedAuthorization |
-GuardianOwnedAuthorization` — do not add an `Unknown` variant to this
-specific enum unless a review of
+**Rule 1 — `AuthorizationMode` itself: exactly three governed states, no
+wire-level fourth.** The enum contains exactly `NoAuthorizationRequired |
+ProviderOwnedAuthorization | GuardianOwnedAuthorization` — do not add an
+`Unknown`/`Unrecognized` variant to *this specific enum* unless a review of
 `docs/guardian/20_Control_Plane/Privilege_and_Authorization.md` and the
 governing TDD contract turns up an explicit requirement for one (none is
-known to exist as of this handoff). An unrecognized wire/serialized value
-for `authorization_mode` MUST NOT become any of the three governed states
-— it MUST produce a typed parse/deserialization error and the caller fails
-closed (the record is rejected/unusable, not silently treated as
-`NoAuthorizationRequired` or any other variant). If the governing contract
-is later found to require an explicit `Unknown` variant instead, follow
-the contract — but the implementation handoff and the independent-review
-handoff must describe the *same* rule; do not let one document imply a
-runtime `Unknown` variant while the other implies a parse-error-only
-scheme.
+known to exist as of this handoff). An unrecognized wire/serialized token
+for the `AuthorizationMode` payload itself (e.g. `"authorization_mode":
+"future_mode_xyz"`) MUST NOT become any of the three governed states — it
+MUST produce a typed parse/deserialization error and the caller fails
+closed (the record is rejected/unusable). This is a **malformed/unsupported
+value**, not an absence of knowledge, and must be distinguishable from
+Rule 2 below in both code and tests. If the governing contract is later
+found to require an explicit fourth `AuthorizationMode` variant instead,
+follow the contract — but the implementation handoff and the
+independent-review handoff must describe the *same* rule; do not let one
+document imply a runtime fourth variant on this enum while the other
+implies a parse-error-only scheme.
 
-**`privilege_requirement` (Dimension B) and every other governed enum in
-this gate (`availability`, `health`, `boot_availability`, `rollback_kind`,
-`current_owner`, incident `status`, event `severity`) — `Unknown` is a
-legitimate runtime variant, not just a wire-parsing fallback.**
-`privilege_requirement` specifically carries `Unknown` as one of its five
-governed states (§5) because the G2 inventory itself has 8 rows that are
-genuinely unresearched — that is real information, not an error condition,
-and must survive into the runtime model as `Unknown`, not merely be
-rejected at deserialization time. For these enums:
+**Rule 2 — `authorization_ownership` (the `Knowledge<AuthorizationMode>`
+wrapper, §5): `Unknown` is a legitimate, first-class runtime state, not a
+parsing fallback.** This is a genuinely different case from Rule 1: Rule 1
+is about an *invalid/unrecognized* `AuthorizationMode` token; Rule 2 is
+about Guardian *never having established* which valid `AuthorizationMode`
+applies at all (the wire representation is absent, or explicitly marked
+unresearched — e.g. a missing field, an explicit `"unknown"` sentinel, or
+whatever wire shape the serialization design settles on). This case
+deserializes cleanly to `Knowledge::Unknown` — it is **not** an error,
+**not** a parse failure, and **not** the same code path as Rule 1's
+malformed-token rejection. Conflating the two (treating "we never
+researched this" the same as "the wire sent us garbage") loses exactly the
+distinction this repair exists to preserve.
+
+**Rule 3 — `privilege_requirement` (Dimension B) and every other governed
+enum in this gate (`availability`, `health`, `boot_availability`,
+`rollback_kind`, `current_owner`, incident `status`, event `severity`) —
+`Unknown` is a legitimate runtime variant, not just a wire-parsing
+fallback.** `privilege_requirement` specifically carries `Unknown` as one
+of its five governed states (§5) because the G2 inventory itself has 8
+rows that are genuinely unresearched — that is real information, not an
+error condition, and must survive into the runtime model as `Unknown`, not
+merely be rejected at deserialization time. For these enums:
 
 - deserializing a value the current binary doesn't recognize MUST produce
   an explicit `Unknown`/parse-failure outcome, never silently default to a
@@ -592,14 +677,20 @@ rejected at deserialization time. For these enums:
   string/discriminant and asserts the result is the explicit unknown case,
   not a panic and not a silent default.
 
-**The two dimensions' unknown states are independent.** A capability may
-legitimately have `authorization_mode = ProviderOwnedAuthorization` (known)
+**The two dimensions' unknown states are independent, and Dimension A's
+two kinds of unknown are independent of each other too.** A capability may
+legitimately have `authorization_ownership = Known(ProviderOwnedAuthorization)`
 while `privilege_requirement = Unknown` (not yet researched) — Guardian
 knows who owns authorization for this operation but hasn't finished
 characterizing its lower-level access requirement. The reverse is also
 possible if research ever proceeds in that order. Do not let one
 dimension's unknown-ness force the other dimension into `Unknown` or into
-a parse error.
+a parse error. And within Dimension A itself:
+`authorization_ownership = Known(NoAuthorizationRequired)` (an established
+architectural fact) and `authorization_ownership = Unknown` (no
+established fact yet) MUST remain distinct at every layer — construction,
+serialization, arbitration (§12 below), and test assertions. Neither may
+ever be used as shorthand for the other.
 
 This mirrors `guardian-provider-api`'s existing `FromStr`-with-explicit-
 unknown pattern (`(value != "unknown").then(...)` for optional provenance
@@ -659,14 +750,18 @@ G3 must not reopen or weaken anything G2 established. Specifically:
   authorization.** If any G3 type has a field or method whose name or
   shape could plausibly be read as "authorization result" (e.g. anything
   resembling `authorized: bool` on a core-owned decision struct), that is
-  a **G2 regression** — rename or restructure it. Both `authorization_mode`
-  and `privilege_requirement` on `CapabilityRecord` (§5) describe
-  *properties of the capability itself* — what kind of authorization it
-  needs, and what OS privilege/access it requires — never *whether the
-  current caller has been authorized* or *what privilege the current
-  process holds*. Keep that distinction sharp in both types and their doc
-  comments; this applies equally to both fields, not just
-  `authorization_mode`.
+  a **G2 regression** — rename or restructure it. Both
+  `authorization_ownership` and `privilege_requirement` on
+  `CapabilityRecord` (§5) describe *properties of the capability itself*
+  — what kind of authorization it needs (or that this is not yet known),
+  and what OS privilege/access it requires — never *whether the current
+  caller has been authorized* or *what privilege the current process
+  holds*. This holds even when `authorization_ownership` is
+  `Known(GuardianOwnedAuthorization)`: that value means only "Guardian
+  owns the authorization mechanism for this capability," never "the
+  current caller passed that authorization." Keep that distinction sharp
+  in both types and their doc comments; this applies equally to both
+  fields.
 - Do not implement any D-Bus-exposed method in this gate. G3 is internal
   typed models only; nothing here changes the G0 public surface
   (`ContractVersion`, `ServiceState`) or the G2 helper's bounded write
@@ -684,16 +779,21 @@ focused tests for:
 - serialization round-trips for every model that crosses a boundary
   (§14 below);
 - the capability/provider identity separation proof (§4);
-- the unknown-handling proof for each governed enum, including the
-  dimension-specific rules in §10 (`authorization_mode`'s exactly-three-
-  states-plus-parse-error vs. `privilege_requirement`'s runtime `Unknown`
-  variant);
-- the `authorization_mode` ⇄ G2-inventory-classification mapping proof and
-  the separate `privilege_requirement` ⇄ G2-inventory-classification
-  mapping proof (§5) — these are two proofs, not one, and neither
-  satisfies the other;
-- the eight adversarial tests in §16.1 proving the two dimensions do not
-  leak into or imply each other.
+- the unknown-handling proof for each governed enum, including the three
+  distinct rules in §10: `AuthorizationMode`'s exactly-three-states-plus-
+  parse-error rule (Rule 1), `authorization_ownership`'s legitimate
+  `Knowledge::Unknown` state (Rule 2), and `privilege_requirement`'s
+  runtime `Unknown` variant (Rule 3) — these are three separate proofs,
+  and Rule 1's parse-error path must be tested distinctly from Rule 2's
+  clean-deserialize-to-`Unknown` path;
+- the `authorization_ownership` ⇄ G2-inventory-classification mapping
+  proof and the separate `privilege_requirement` ⇄ G2-inventory-
+  classification mapping proof (§5) — these are two proofs, not one, and
+  neither satisfies the other; both must correctly leave all 8 unresearched
+  rows unknown on both dimensions;
+- the ten adversarial/model tests in §16.1 proving the dimensions, and
+  Dimension A's two kinds of unknown, do not leak into or imply each
+  other.
 
 Name these tests descriptively (matching this repository's existing style,
 e.g. `capability_identity_survives_provider_change`,
@@ -753,34 +853,56 @@ commits) or, at minimum, in the completion report's TDD-order narrative.
 
 ## 16.1 Authorization/privilege dimension tests (required, in addition to §16.2)
 
-These eight are required focused tests, not optional adversarial thought
+These ten are required focused tests, not optional adversarial thought
 experiments — write them, do not merely reason about them:
 
-1. an unrecognized/future `privilege_requirement` wire value does not
-   silently become `NoDirectPrivilege`.
-2. `authorization_mode = ProviderOwnedAuthorization` does not imply, and
-   cannot be conflated with, "Guardian holds elevated privilege."
-3. `authorization_mode = GuardianOwnedAuthorization` does not imply
-   `privilege_requirement = RootOrSystemPrivilege` (the
-   `power-profiles-daemon HoldProfile` fixture from §5 must prove this:
-   `GuardianOwnedAuthorization` + `NoDirectPrivilege` together).
-4. `privilege_requirement = RootOrSystemPrivilege` does not imply
-   `authorization_mode = GuardianOwnedAuthorization` (construct a fixture
-   where a provider requires root-level access but performs its own
-   authorization — `authorization_mode` must remain
-   `ProviderOwnedAuthorization`).
-5. `authorization_mode` and `privilege_requirement` serialize and
-   deserialize independently — round-trip a record with every combination
-   of a known value on one dimension and `Unknown`/unrecognized on the
-   other, and confirm neither field's outcome depends on the other's.
-6. an unrecognized wire value for `authorization_mode` specifically fails
-   closed via a typed parse/deserialization error — it does not become
-   `NoAuthorizationRequired` or any other of the three governed states
-   (§10).
-7. changing `privilege_requirement` on a capability (e.g. as host research
-   resolves an `Unknown` row) does not alter `capability_id`.
-8. changing `authorization_mode` on a capability does not alter
-   `provider_id`.
+1. `authorization_ownership = Known(NoAuthorizationRequired)` is
+   distinguishable from `authorization_ownership = Unknown` — they are
+   different values, must compare unequal, and must not collapse to the
+   same serialized wire representation.
+2. an unknown/unresearched authorization owner (`authorization_ownership
+   = Unknown`) never becomes `Known(NoAuthorizationRequired)` anywhere —
+   not in construction, not in serialization, not in arbitration.
+3. all eight `unknown — requires host research` G2 inventory rows (§5)
+   map to `authorization_ownership = Unknown`, and remain so unless a
+   specific row's own recorded evidence text explicitly proves an owner —
+   fixtures must not manufacture a known owner for any of the eight from
+   general platform knowledge or architectural preference.
+4. all eight of the same rows map to `privilege_requirement = Unknown`.
+5. a known `provider-owned authorization` row (e.g. `UDisks PowerOff`)
+   round-trips through serialization as `authorization_ownership =
+   Known(ProviderOwnedAuthorization)`.
+6. a known `Guardian polkit authorization` row (`power-profiles-daemon
+   HoldProfile`) round-trips through serialization as
+   `authorization_ownership = Known(GuardianOwnedAuthorization)`.
+7. an unsupported/future serialized `AuthorizationMode` token (e.g.
+   `"authorization_mode": "future_mode_xyz"`) returns a typed
+   parse/deserialization failure — distinct from, and not silently
+   converted to, `authorization_ownership = Unknown` (§10 Rule 1 vs.
+   Rule 2).
+8. `authorization_ownership = Unknown` serializes/deserializes to a wire
+   form distinct from `Known(NoAuthorizationRequired)`'s wire form — the
+   round-trip test for one must not accidentally pass for the other.
+9. changing only the authorization-ownership knowledge state (e.g.
+   `Unknown` → `Known(...)` as research resolves it) does not alter
+   `capability_id`. (This generalizes the earlier "changing
+   `authorization_ownership` does not alter `provider_id`" requirement —
+   also required, and covered by item 9's fixture if constructed to vary
+   both.)
+10. arbitration fails closed (`write_permitted = false`) when the
+    `authorization_ownership` relevant to a proposed write is `Unknown`
+    (implementation §7, arbitration invariant 6) — this test must remain
+    data-model/arbitration behavior only, and must not implement or
+    simulate G4's transaction machine or any privileged authorization
+    logic.
+
+Also retain, as part of this same test group: `privilege_requirement =
+RootOrSystemPrivilege` does not imply `authorization_ownership =
+Known(GuardianOwnedAuthorization)` (construct a fixture where a provider
+requires root-level access but performs its own authorization —
+`authorization_ownership` must remain `Known(ProviderOwnedAuthorization)`),
+and the two dimensions' fields serialize/deserialize independently across
+every combination of known/unknown on each side.
 
 ## 16.2 General adversarial self-check
 
@@ -851,13 +973,16 @@ under test.
 
 Include, at minimum: which normative tests are green with exact names/IDs;
 crate-placement decisions and justification (§11); **both** the
-`authorization_mode` enum's mapping and the separate `privilege_requirement`
-model's mapping against all 24 Privilege Requirement Inventory rows,
-reported as two distinct tables, not one combined claim; determinism-test
-results (§7); the §16.1 and §16.2 adversarial self-check results
-item-by-item; confirmation that `P0-REG-003`/`004` remain green unmodified;
-full `cargo fmt --check` / `cargo clippy --workspace --all-targets
---all-features -- -D warnings` / `cargo test --workspace` output; and an
+`authorization_ownership` model's mapping (explicitly showing which of the
+24 rows are `Known(...)` and which are `Unknown`, and confirming all 8
+unresearched rows landed on `Unknown`, not a manufactured `Known` value)
+and the separate `privilege_requirement` model's mapping against all 24
+Privilege Requirement Inventory rows, reported as two distinct tables, not
+one combined claim; determinism-test results (§7); the §16.1 and §16.2
+adversarial self-check results item-by-item; confirmation that
+`P0-REG-003`/`004` remain green unmodified; full `cargo fmt --check` /
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` /
+`cargo test --workspace` output; and an
 explicit statement of what was deferred to G4 or G8 and why.
 
 Then stop. Do not begin G4. Do not tag G3 — independent review happens

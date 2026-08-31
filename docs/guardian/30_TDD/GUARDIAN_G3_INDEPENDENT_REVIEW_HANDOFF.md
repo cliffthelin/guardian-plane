@@ -69,12 +69,29 @@ FAIL — G4/G8 SCOPE LEAK
 
 `FAIL — AUTHORIZATION / PRIVILEGE DIMENSIONS CONFLATED` replaces the
 narrower `FAIL — AUTHORIZATION OWNERSHIP CONFLATED` concept from an
-earlier draft of this handoff. It covers both: (a) authorization ownership
-itself being conflated with something else, and (b) — the specific defect
-this handoff was repaired to catch — a single field/enum being used to
-represent *both* "who owns authorization" and "what OS privilege/access is
-required," which are two independent dimensions per the implementation
-handoff §5.
+earlier draft of this handoff, and now explicitly covers **three** distinct
+sub-defects — check all three, do not stop at the first:
+
+(a) authorization ownership conflated with privilege/access requirement —
+a single field/enum representing *both* "who owns authorization" and
+"what OS privilege/access is required" (two independent dimensions per
+implementation handoff §5);
+
+(b) `FAIL — UNKNOWN AUTHORIZATION OWNERSHIP COLLAPSED` — Guardian not yet
+having established which `AuthorizationMode` applies for a capability
+being represented as, or silently converted into, one of the three known
+`AuthorizationMode` values (almost always `NoAuthorizationRequired`, since
+that is the "safest-looking" default) instead of an explicit
+`Unknown`/unresearched state, per implementation handoff §5/§10 Rule 2 —
+this is the specific defect this repair pass exists to catch, most
+concretely checkable against the 8 unresearched G2 inventory rows (§8.3
+below);
+
+(c) the two kinds of "unknown" within Dimension A itself conflated with
+each other — a malformed/unrecognized wire token for `AuthorizationMode`
+(Rule 1, must fail closed via a typed parse error) treated the same as a
+legitimate, cleanly-deserializing "we never researched this"
+(Rule 2, `Unknown`), or vice versa.
 
 A `PASS` means the core data models are sound enough to become Guardian's
 G3 milestone.
@@ -170,24 +187,43 @@ This gate's central structural check is that these are **two independent
 dimensions**, each with its own field/type, never one field representing
 both.
 
-## 8.1 Authorization ownership (Dimension A — `authorization_mode`)
+## 8.1 `AuthorizationMode` itself (the architectural enum, when known)
 
-- Confirm `authorization_mode` (or equivalent) has exactly the three
-  states G2 established: `NoAuthorizationRequired` /
-  `ProviderOwnedAuthorization` / `GuardianOwnedAuthorization` — not
-  collapsed into a boolean, not expanded with an unevidenced fourth state.
-- Confirm this field answers only "who performs/owns authorization?" —
-  never "what OS privilege is required?" and never "is the current caller
-  authorized?"
+- Confirm `AuthorizationMode` (or equivalent) has exactly the three states
+  G2 established: `NoAuthorizationRequired` / `ProviderOwnedAuthorization`
+  / `GuardianOwnedAuthorization` — not collapsed into a boolean, not
+  expanded with an unevidenced fourth state on *this specific enum*.
+- Confirm this enum answers only "who performs/owns authorization, when
+  that is known?" — never "what OS privilege is required?" and never "is
+  the current caller authorized?" — including when the value is
+  `GuardianOwnedAuthorization`, which means only "Guardian owns the
+  authorization mechanism," never "the current caller passed it."
 - Confirm `ProviderOwnedAuthorization` is never rendered or documented as
   "Guardian is privileged" anywhere (code, doc comments, tests).
-- Confirm an unrecognized wire value for this specific field fails closed
-  via a typed parse/deserialization error, and does **not** become any of
-  the three governed states, and does **not** silently gain a fourth
-  runtime `Unknown` variant unless the governing contract is shown to
-  require one (implementation handoff §10).
+- Confirm an unrecognized wire value for the `AuthorizationMode` payload
+  itself fails closed via a typed parse/deserialization error (implementation
+  handoff §10 Rule 1) — this is a malformed-token rejection, distinct from
+  §8.2 below.
 
-## 8.2 Privilege/access requirement (Dimension B — `privilege_requirement`
+## 8.2 Authorization-ownership knowledge state (`authorization_ownership`,
+wrapping `AuthorizationMode` — the field actually on `CapabilityRecord`)
+
+- Confirm a real, explicit knowledge wrapper exists (`Knowledge<AuthorizationMode>`,
+  a dedicated `Known`/`Unresearched` enum, or a documented `Option` — per
+  implementation handoff §5) — not a bare `AuthorizationMode` value with no
+  way to represent "not yet established."
+- Confirm `authorization_ownership = Unknown` (or equivalent) is a
+  legitimate, cleanly-deserializing runtime state — **not** routed through
+  the same code path as §8.1's malformed-token parse error, and **not**
+  an error condition at all.
+- Confirm `Known(NoAuthorizationRequired)` and `Unknown` are genuinely
+  distinct: different equality behavior, different serialized wire form,
+  never substitutable for each other in code or tests. If the
+  implementation ever treats "we don't know" the same as "we know it needs
+  nothing," that is `FAIL — UNKNOWN AUTHORIZATION OWNERSHIP COLLAPSED`
+  (§3(b)).
+
+## 8.3 Privilege/access requirement (Dimension B — `privilege_requirement`
 or equivalent)
 
 - Confirm a **separate** typed field/model exists for "what OS-level
@@ -202,36 +238,56 @@ or equivalent)
 - Confirm `RootOrSystemPrivilege` is never rendered or documented as
   implying `GuardianOwnedAuthorization`, and vice versa.
 
-## 8.3 Cross-check against the G2 inventory (both dimensions, separately)
+## 8.4 Cross-check against the G2 inventory (both dimensions, separately —
+audit the actual inventory text, do not trust fixture declarations)
 
-- Cross-check `authorization_mode` against all 24 rows of
+- Cross-check `authorization_ownership` against all 24 rows of
   `docs/evidence/g2/PRIVILEGE_REQUIREMENT_INVENTORY.md`: does every row's
-  authorization-ownership classification map onto this enum without loss?
+  authorization-ownership classification map onto `Known(...)` correctly,
+  and — critically — **do all 8 `unknown — requires host research` rows
+  (`BPF/eBPF`, `thermald (write policy)`, `NVML/NVIDIA`, `fwupd`, `journald
+  (rotation/capacity policy)`, `apt/package state`, `generic hardware
+  control`, `USB Security / usbguard`) map to `Unknown`, not a manufactured
+  `Known(...)` value?** Read the inventory's own text for each of these 8
+  rows directly — none of them records a separate authorization-ownership
+  finding distinct from their single "unknown — requires host research"
+  classification. If the implementation assigns any of these 8 a `Known`
+  authorization owner, that is `FAIL — UNKNOWN AUTHORIZATION OWNERSHIP
+  COLLAPSED` (§3(b)), regardless of how plausible the assigned owner might
+  seem architecturally.
 - **Separately**, cross-check `privilege_requirement` against the same 24
   rows: does every row's privilege/access classification (including all 8
   `unknown — requires host research` rows remaining `Unknown`) map onto
   this model without loss?
 - Confirm these are reported as two distinct mappings in the completion
   report, not one combined claim.
-- Spot-check the `power-profiles-daemon (HoldProfile)` row specifically:
-  it must land on `authorization_mode = GuardianOwnedAuthorization` *and*
-  `privilege_requirement = NoDirectPrivilege` simultaneously — if the
-  implementation cannot represent this combination, that is the exact
-  defect this handoff was repaired to catch.
+- Spot-check `power-profiles-daemon (HoldProfile)`: must land on
+  `authorization_ownership = Known(GuardianOwnedAuthorization)` *and*
+  `privilege_requirement = NoDirectPrivilege` simultaneously.
+- Spot-check `UDisks PowerOff`: must land on `authorization_ownership =
+  Known(ProviderOwnedAuthorization)` *and* `privilege_requirement =
+  NoDirectPrivilege` simultaneously. If either spot-check fails, that is
+  the exact defect the prior repair pass was meant to catch.
 
-## 8.4 Independence proof
+## 8.5 Independence proof
 
-- Confirm a test exists proving the two fields serialize/deserialize and
-  vary independently (implementation handoff §16.1, item 5) — changing one
+- Confirm a test exists proving the two dimensions serialize/deserialize
+  and vary independently (implementation handoff §16.1) — changing one
   dimension's value must not affect the other's stored value or its own
   round-trip correctness.
 - Confirm changing `privilege_requirement` never alters `capability_id`,
-  and changing `authorization_mode` never alters `provider_id`
-  (implementation handoff §16.1, items 7–8).
+  and changing `authorization_ownership` never alters `provider_id` or
+  `capability_id`.
+- Confirm arbitration fails closed (`write_permitted = false`) when
+  `authorization_ownership` relevant to a proposed write is `Unknown`
+  (implementation §7 invariant 6) — and confirm this stayed data-model-
+  level, with no privileged authorization logic or G4 transaction runtime
+  introduced to build it.
 
 If any of the above shows the two dimensions collapsed into one field, one
-dimension silently implying a value for the other, or an unknown state on
-one dimension forcing a false-known or false-unknown state on the other,
+dimension silently implying a value for the other, `Unknown` authorization
+ownership collapsed into a known state (§8.2/§8.4), or Rule 1's parse-error
+path conflated with Rule 2's clean-`Unknown` path (§8.1 vs. §8.2),
 verdict is `FAIL — AUTHORIZATION / PRIVILEGE DIMENSIONS CONFLATED`.
 
 ---
@@ -250,12 +306,13 @@ runs entirely in the domain G2 designated unprivileged.
 - Does anything in G3 grant, imply, or prepare privilege for
   `guardian-core` itself, in tension with ADR-002's "the core itself must
   not become elevated"?
-- Does `authorization_mode` describe *what kind of authorization a
-  capability needs* (correct) rather than *whether the current caller
-  currently has it* (would be a category error and a potential regression
-  vector)? Does `privilege_requirement` describe *what OS privilege the
-  operation needs* (correct) rather than *what privilege the current
-  process holds* (also a category error)?
+- Does `authorization_ownership`/`AuthorizationMode` describe *what kind
+  of authorization a capability needs, when that is established* (correct)
+  rather than *whether the current caller currently has it* (would be a
+  category error and a potential regression vector), even in the
+  `Known(GuardianOwnedAuthorization)` case? Does `privilege_requirement`
+  describe *what OS privilege the operation needs* (correct) rather than
+  *what privilege the current process holds* (also a category error)?
 
 If G3 introduces anything that could let a core-owned value be mistaken
 for privileged authorization/identity proof, verdict is
@@ -282,28 +339,36 @@ If any of these exist, verdict is `FAIL — G4/G8 SCOPE LEAK`.
 
 # 11. Unknown-handling audit
 
-Confirm the two authorization/privilege dimensions follow their own,
-different rules (implementation handoff §10) — do not accept one blanket
-"unknown handling" claim covering both:
+Confirm the dimensions — and, within Dimension A, its two kinds of
+"unknown" — each follow their own, different rule (implementation handoff
+§10) — do not accept one blanket "unknown handling" claim covering all of
+them:
 
-- `authorization_mode` specifically: an unrecognized wire value produces a
-  typed parse/deserialization error and fails closed — it does **not**
-  become one of the three governed states, and does **not** gain a runtime
-  `Unknown` fourth variant unless the governing contract is shown to
-  require one. If the implementation added an `Unknown` variant to this
-  specific enum without such justification, that is a finding — flag it.
+- `AuthorizationMode` itself (Rule 1): an unrecognized wire value for the
+  enum payload produces a typed parse/deserialization error and fails
+  closed — it does **not** become one of the three governed states, and
+  does **not** gain a runtime `Unknown` fourth variant unless the
+  governing contract is shown to require one. If the implementation added
+  an `Unknown` variant to this specific enum without such justification,
+  that is a finding — flag it.
+- `authorization_ownership` (Rule 2): confirm `Unknown` is a legitimate,
+  cleanly-deserializing runtime state — not routed through Rule 1's
+  parse-error path, and not itself an error. Confirm a real test exists
+  that constructs/deserializes an unresearched capability and asserts it
+  lands on `Unknown`, not a parse failure and not `Known(...)`.
 - `privilege_requirement` and every other governed enum
   (`availability`, `health`, `boot_availability`, `rollback_kind`,
-  `current_owner`, incident `status`, event `severity`): confirm a real
-  test exists that feeds an unrecognized value and asserts an explicit
-  `Unknown`/parse-failure result — not a panic, not a silent default to a
-  safe/available/authorized value.
+  `current_owner`, incident `status`, event `severity`) (Rule 3): confirm
+  a real test exists that feeds an unrecognized value and asserts an
+  explicit `Unknown`/parse-failure result — not a panic, not a silent
+  default to a safe/available/authorized value.
 
 Spot-check at least three enums by direct inspection rather than trusting
 the completion report's claim, and confirm the implementation and review
-handoffs' descriptions of `authorization_mode`'s specific rule actually
-match what was built (§10 requires the two handoff documents to describe
-the *same* rule — if the code disagrees with either document, that is
+handoffs' descriptions of `AuthorizationMode`'s Rule 1 and
+`authorization_ownership`'s Rule 2 actually match what was built (§10
+requires the two handoff documents to describe the *same* rules — if the
+code disagrees with either document, that is
 itself a finding).
 
 ---
@@ -322,27 +387,35 @@ itself a finding).
 
 ## 13.1 Authorization/privilege dimension questions (mirrors implementation handoff §16.1)
 
-a. does an unrecognized/future `privilege_requirement` wire value silently
-   become `NoDirectPrivilege`?
-b. is `authorization_mode = ProviderOwnedAuthorization` ever conflated
-   with "Guardian holds elevated privilege"?
-c. does `authorization_mode = GuardianOwnedAuthorization` imply
-   `privilege_requirement = RootOrSystemPrivilege` anywhere (check the
-   `power-profiles-daemon HoldProfile` fixture specifically — it must
-   prove the opposite)?
-d. does `privilege_requirement = RootOrSystemPrivilege` imply
-   `authorization_mode = GuardianOwnedAuthorization` anywhere?
-e. do `authorization_mode` and `privilege_requirement` round-trip
-   independently through serialization (test every combination of known/
-   unknown across both)?
-f. does an unrecognized wire value for `authorization_mode` specifically
-   fail closed via a typed parse error, rather than becoming
-   `NoAuthorizationRequired` or gaining an unjustified runtime `Unknown`
-   variant?
-g. does changing `privilege_requirement` on a capability ever alter its
-   `capability_id`?
-h. does changing `authorization_mode` on a capability ever alter its
-   `provider_id`?
+a. is `Known(NoAuthorizationRequired)` ever equal to, or substitutable
+   for, `Unknown` (or vice versa) anywhere — construction, comparison,
+   serialization, or arbitration?
+b. does an unknown/unresearched authorization owner ever become
+   `Known(NoAuthorizationRequired)`?
+c. do all eight `unknown — requires host research` G2 inventory rows map
+   to `authorization_ownership = Unknown` — checked by reading the
+   inventory's own text for each row directly, not by trusting the
+   fixture's claimed mapping?
+d. do all eight of the same rows map to `privilege_requirement = Unknown`?
+e. does the `UDisks PowerOff` fixture round-trip as `authorization_ownership
+   = Known(ProviderOwnedAuthorization)`?
+f. does the `power-profiles-daemon HoldProfile` fixture round-trip as
+   `authorization_ownership = Known(GuardianOwnedAuthorization)`?
+g. does an unsupported/future serialized `AuthorizationMode` token return a
+   typed parse/deserialization failure, distinct from — and never silently
+   converted to — `authorization_ownership = Unknown`?
+h. does `authorization_ownership = Unknown` serialize/deserialize to a
+   wire form distinct from `Known(NoAuthorizationRequired)`'s wire form?
+i. does changing only the authorization-ownership knowledge state ever
+   alter `capability_id` or `provider_id`?
+j. does arbitration fail closed (`write_permitted = false`) when
+   `authorization_ownership` relevant to a proposed write is `Unknown` —
+   and does that stay data-model/arbitration behavior only, with no
+   privileged authorization logic or G4 transaction runtime introduced?
+k. does `privilege_requirement = RootOrSystemPrivilege` imply
+   `authorization_ownership = Known(GuardianOwnedAuthorization)` anywhere
+   (construct/inspect a fixture where a provider requires root-level
+   access but performs its own authorization)?
 
 Report each as confirmed safe / confirmed unsafe / not applicable, with
 the specific file/test supporting the conclusion — same as §13.2 below.
@@ -407,8 +480,11 @@ failed) still passes unmodified, plus the new G3 tests, all green.
 5. Determinism audit (§6)
 6. Single-writer/arbitration audit (§7)
 7. Authorization ownership and privilege/access requirement audit (§8),
-   reporting §8.1–§8.4 separately, including the two distinct G2-inventory
-   mapping tables (one per dimension) and the independence-proof result
+   reporting §8.1–§8.5 separately — explicitly including whether the eight
+   unresearched G2 inventory rows landed on `Unknown` (correct) or a
+   manufactured `Known(...)` value (§3(b) failure) — plus the two distinct
+   G2-inventory mapping tables (one per dimension) and the
+   independence-proof result
 8. G2 privilege-boundary regression audit (§9)
 9. Scope-leak audit (§10)
 10. Unknown-handling audit (§11)
