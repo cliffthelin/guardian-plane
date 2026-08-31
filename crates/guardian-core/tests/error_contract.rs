@@ -5,71 +5,71 @@ use zbus::DBusError;
 const EXPECTED_ERROR_NAMES: [(GuardianErrorCategory, &str); 17] = [
     (
         GuardianErrorCategory::NotAuthorized,
-        "org.guardianproject.Development.Guardian1.Error.NotAuthorized",
+        "io.github.cliffthelin.Guardian1.Error.NotAuthorized",
     ),
     (
         GuardianErrorCategory::AuthenticationUnavailable,
-        "org.guardianproject.Development.Guardian1.Error.AuthenticationUnavailable",
+        "io.github.cliffthelin.Guardian1.Error.AuthenticationUnavailable",
     ),
     (
         GuardianErrorCategory::Unsupported,
-        "org.guardianproject.Development.Guardian1.Error.Unsupported",
+        "io.github.cliffthelin.Guardian1.Error.Unsupported",
     ),
     (
         GuardianErrorCategory::ProviderUnavailable,
-        "org.guardianproject.Development.Guardian1.Error.ProviderUnavailable",
+        "io.github.cliffthelin.Guardian1.Error.ProviderUnavailable",
     ),
     (
         GuardianErrorCategory::ProviderChanged,
-        "org.guardianproject.Development.Guardian1.Error.ProviderChanged",
+        "io.github.cliffthelin.Guardian1.Error.ProviderChanged",
     ),
     (
         GuardianErrorCategory::PreconditionFailed,
-        "org.guardianproject.Development.Guardian1.Error.PreconditionFailed",
+        "io.github.cliffthelin.Guardian1.Error.PreconditionFailed",
     ),
     (
         GuardianErrorCategory::Conflict,
-        "org.guardianproject.Development.Guardian1.Error.Conflict",
+        "io.github.cliffthelin.Guardian1.Error.Conflict",
     ),
     (
         GuardianErrorCategory::Busy,
-        "org.guardianproject.Development.Guardian1.Error.Busy",
+        "io.github.cliffthelin.Guardian1.Error.Busy",
     ),
     (
         GuardianErrorCategory::TimedOut,
-        "org.guardianproject.Development.Guardian1.Error.TimedOut",
+        "io.github.cliffthelin.Guardian1.Error.TimedOut",
     ),
     (
         GuardianErrorCategory::Cancelled,
-        "org.guardianproject.Development.Guardian1.Error.Cancelled",
+        "io.github.cliffthelin.Guardian1.Error.Cancelled",
     ),
     (
         GuardianErrorCategory::InvalidRequest,
-        "org.guardianproject.Development.Guardian1.Error.InvalidRequest",
+        "io.github.cliffthelin.Guardian1.Error.InvalidRequest",
     ),
     (
         GuardianErrorCategory::Unsafe,
-        "org.guardianproject.Development.Guardian1.Error.Unsafe",
+        "io.github.cliffthelin.Guardian1.Error.Unsafe",
     ),
     (
         GuardianErrorCategory::ApplyFailed,
-        "org.guardianproject.Development.Guardian1.Error.ApplyFailed",
+        "io.github.cliffthelin.Guardian1.Error.ApplyFailed",
     ),
     (
         GuardianErrorCategory::ObservationFailed,
-        "org.guardianproject.Development.Guardian1.Error.ObservationFailed",
+        "io.github.cliffthelin.Guardian1.Error.ObservationFailed",
     ),
     (
         GuardianErrorCategory::RollbackFailed,
-        "org.guardianproject.Development.Guardian1.Error.RollbackFailed",
+        "io.github.cliffthelin.Guardian1.Error.RollbackFailed",
     ),
     (
         GuardianErrorCategory::PersistenceFailed,
-        "org.guardianproject.Development.Guardian1.Error.PersistenceFailed",
+        "io.github.cliffthelin.Guardian1.Error.PersistenceFailed",
     ),
     (
         GuardianErrorCategory::Internal,
-        "org.guardianproject.Development.Guardian1.Error.Internal",
+        "io.github.cliffthelin.Guardian1.Error.Internal",
     ),
 ];
 

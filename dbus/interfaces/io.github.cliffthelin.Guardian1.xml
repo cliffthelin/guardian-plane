@@ -1,6 +1,6 @@
 <!-- Expected G0 public interface. P0-DBUS tests introspect a live export independently. -->
-<node name="/org/guardianproject/Development/Guardian1">
-  <interface name="org.guardianproject.Development.Guardian1">
+<node name="/io/github/cliffthelin/Guardian1">
+  <interface name="io.github.cliffthelin.Guardian1">
     <method name="ContractVersion">
       <arg type="s" direction="out"/>
     </method>
