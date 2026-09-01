@@ -142,6 +142,19 @@ filename: candidate, environment, capture timestamp):
 and status/icon-update-propagates, specifically *given* the Ubuntu
 AppIndicators extension is active.
 
+> **Correction (added during G6 evidence closure, not a re-run of this
+> spike): see `G6_ICON_NAME_CORRECTION.md`.** The `"emblem-default"` icon
+> name used above does not exist in the tested Adwaita build; the glyph
+> shown in `icon-visible-pass.png` is a generic fallback icon, not the
+> intended one -- confirmed by direct contrast against a true
+> no-candidate baseline from the same VM session, which showed neither
+> that glyph nor anything else in its place. This does not change the
+> PASS determination above: a real, attributable, interactive element
+> genuinely appeared, and the click/menu/handler/status evidence in this
+> document is unaffected. It only corrects what "icon appears" precisely
+> evidenced. Later G6 closure evidence uses icon names verified present
+> before use.
+
 ## What this run does and does not establish
 
 Established, with real evidence:

@@ -104,6 +104,17 @@ layout (this package is not part of a default `xfce4` install; a stock
 Ubuntu Xfce spin's actual default plugin set was not independently
 verified this pass -- see "Not yet established" below).
 
+> **Correction (added during G6 evidence closure, not a re-run of this
+> spike): see `G6_ICON_NAME_CORRECTION.md`.** The `"emblem-default"` icon
+> name used above does not exist in the tested Adwaita build; the glyph
+> shown in `icon-visible-pass.png` (a green checkmark-in-circle) is a
+> generic fallback icon, not the intended one -- confirmed by direct
+> contrast against `candidate-none_..._icon-gone-after-kill-confirms-provenance.png`,
+> which shows the same panel with that glyph genuinely absent. This does
+> not change the PASS determination above: a real, attributable,
+> interactive element genuinely appeared. Later G6 closure evidence uses
+> icon names verified present before use.
+
 ### Menu-opens: UNRESOLVED, not established either way
 
 Three real synthetic-click attempts (via QMP `input-send-event`, at the

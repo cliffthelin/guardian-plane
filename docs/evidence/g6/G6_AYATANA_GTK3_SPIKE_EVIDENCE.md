@@ -103,6 +103,13 @@ auth cookie, not just `DISPLAY=:0`. Corrected and re-run; documented here
 for reproducibility, not as a candidate finding.)
 
 - **Icon appears: PASS.** `gnome50-ayatana-gtk3/candidate-ayatana-gtk3_..._icon-visible-pass.png`.
+  > **Correction (added during G6 evidence closure): see
+  > `G6_ICON_NAME_CORRECTION.md`.** The `"emblem-default"` icon name used
+  > here does not exist in the tested Adwaita build; the glyph shown is a
+  > generic fallback, not the intended icon -- confirmed by contrast
+  > against a true no-candidate baseline from the same VM session. Does
+  > not change this PASS: a real, attributable element genuinely
+  > appeared, and the menu/click evidence below is unaffected.
 - **Menu opens + menu action invokes handler: PASS.** `..._menu-open-pass.png` shows the real menu with the prototype's exact three items; `menu_clicks=1` in the log confirms the click reached the handler.
 - **Status/icon-update propagates: PARTIAL, with a real implementation-shape finding.** The status genuinely changed (`status toggled to Degraded` in the log, and `app_indicator_set_status(ATTENTION)` was genuinely called), but the rendered icon glyph did **not** visually change (`..._status-toggled-icon-unchanged.png` is visually identical to the icon-visible screenshot). This is because the AppIndicator C API requires a *separate* explicit call, `app_indicator_set_attention_icon`/`_full`, to change the icon shown for `ATTENTION` status -- this prototype (deliberately kept minimal, mirroring the ksni prototype's scope) never made that call. This is a real, disclosed API-shape difference from candidate 3: `ksni`'s single `icon_name()` method automatically reflects status in the icon, while AppIndicator requires the caller to explicitly wire a second icon for the attention state. Worth recording as a genuine comparison point (candidate 1 needs one more explicit call for equivalent behavior), not silently worked around.
 
@@ -119,6 +126,11 @@ for reproducibility, not as a candidate finding.)
 ```
 
 - **Icon appears: PASS.** `xfce420-ayatana-gtk3/candidate-ayatana-gtk3_..._icon-visible-pass.png`, with `xfce4-indicator-plugin` installed (same requirement the ksni Xfce spike already established -- Xfce's stock panel has no SNI/AppIndicator awareness by default for either candidate tested so far).
+  > **Correction (added during G6 evidence closure): see
+  > `G6_ICON_NAME_CORRECTION.md`.** Same `"emblem-default"` fallback-glyph
+  > finding as the GNOME result above applies here (a green
+  > checkmark-in-circle fallback, not the intended icon) -- does not
+  > change this PASS.
 - **Menu opens + menu action invokes handler: PASS.** `..._menu-open-pass.png` shows the real menu; `menu_clicks=1` confirms the click reached the handler -- using the *exact same* synthetic-click technique (QMP `input-send-event` at the icon's confirmed on-screen coordinates) that produced no menu at all for candidate 3 on Xfce (`G6_XFCE_KSNI_SPIKE_EVIDENCE.md`).
 
 **This directly narrows the ksni-on-Xfce menu-open ambiguity.** Since the
