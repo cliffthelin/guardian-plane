@@ -367,6 +367,7 @@ name = "guardian-core"
 version = "0.1.0"
 dependencies = [
  "async-io",
+ "guardian-provider-api",
  "guardian-testkit",
  "zbus",
 ]
@@ -385,6 +386,7 @@ dependencies = [
 name = "guardian-provider-api"
 version = "0.1.0"
 dependencies = [
+ "async-io",
  "sha2",
 ]
 

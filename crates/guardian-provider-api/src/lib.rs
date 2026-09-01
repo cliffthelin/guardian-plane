@@ -1,4 +1,20 @@
-//! Provider-facing public contract records for G0.
+//! Provider-facing public contract records for G0 and G3.
+
+pub mod capability;
+pub mod ids;
+pub mod provider;
+
+pub use capability::{
+    AuthorizationMode, AuthorizationModeParseError, Availability, BootAvailability,
+    BootAvailabilitySet, CapabilityRecord, CostLevel, DiagnosticCost, Health, InterfaceKind,
+    Knowledge, PrivilegeRequirement, ProviderHealth,
+};
+pub use ids::{CapabilityId, EventId, IdParseError, IncidentId, ProviderId};
+pub use provider::{
+    ActionRequest, ApplyOutcome, InspectionSnapshot, MutableCapabilityAdapter,
+    ObservationExpectation, ObservationOutcome, ProbeResult, Provider, ProviderIdentity,
+    RawProviderEvent, RollbackOutcome, StateSnapshot, Unsupported, ValidationResult,
+};
 
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
