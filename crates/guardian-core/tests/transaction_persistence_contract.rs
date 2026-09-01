@@ -19,6 +19,7 @@ fn base_record() -> PersistedTransactionRecord {
         state: TransactionState::Applying,
         arbitration_revision: Some(3),
         apply_outcome: Some(ApplyOutcome::ConfirmedSuccess),
+        last_observation: None,
         rollback_result: None,
         cancellation_requested: false,
         deadline_expired: false,

@@ -7,6 +7,7 @@
 //! legal-transition/terminal-immutability check used everywhere else.
 
 use std::fmt;
+use std::path::Path;
 
 use guardian_provider_api::{
     ActionRequest, CapabilityRecord, Knowledge, MutableCapabilityAdapter,
@@ -20,6 +21,7 @@ use crate::identity::CallerIdentity;
 use crate::transaction::apply::{ApplyOutcome, ApplyRecord};
 use crate::transaction::arbitration_source::ArbitrationStateSource;
 use crate::transaction::observation::ObservationOutcome;
+use crate::transaction::persistence::{PersistedTransactionRecord, persist};
 use crate::transaction::record::{Snapshot, TransactionRecord, ValidationOutcome};
 use crate::transaction::rollback::RollbackOutcome;
 use crate::transaction::state::{IllegalTransition, TransactionState};
@@ -35,6 +37,15 @@ pub enum EngineError {
     MustObserveBeforeRetry,
     ObservationInconclusive,
     MissingSnapshot,
+    /// `Apply` was called on a record whose state is not a legal Apply
+    /// entry point (audit Finding 1) -- returned *before* `provider.apply`
+    /// is ever reached, never discovered afterward via an illegal-
+    /// transition error.
+    ApplyPreconditionNotMet(TransactionState),
+    /// The durable Apply-intent/Apply-outcome persist call itself failed
+    /// (audit Finding 3, G4 handoff §19.1). When this occurs *before* the
+    /// provider is invoked, the provider call is skipped entirely.
+    PersistenceFailed(String),
 }
 
 impl fmt::Display for EngineError {
@@ -57,6 +68,15 @@ impl fmt::Display for EngineError {
                 formatter.write_str("no conclusive observation recorded yet")
             }
             Self::MissingSnapshot => formatter.write_str("no snapshot recorded"),
+            Self::ApplyPreconditionNotMet(state) => {
+                write!(
+                    formatter,
+                    "apply is not a legal entry point from state {state}"
+                )
+            }
+            Self::PersistenceFailed(reason) => {
+                write!(formatter, "durable persistence failed: {reason}")
+            }
         }
     }
 }
@@ -255,6 +275,37 @@ fn parse_apply_payload(raw: &guardian_provider_api::ApplyOutcome) -> ApplyOutcom
 /// (§18.3) is refused with [`EngineError::MustObserveBeforeRetry`] rather
 /// than silently re-applying or fabricating success.
 ///
+/// **Entry precondition (audit Finding 1)**: `provider.apply` is reachable
+/// only from `Authorized` (a fresh attempt), from `Applying` with an
+/// existing `apply_record` (a legitimate in-flight retry -- e.g. a prior
+/// durable-persistence failure that occurred before the provider was ever
+/// called), or from `Observing` with a durably-known `ConfirmedSuccess`
+/// (a pure idempotent no-op for a duplicate client request). Every other
+/// state -- including every pre-Authorize state and every terminal state
+/// such as `Rejected`/`Failed`/`Committed` -- is rejected immediately with
+/// [`EngineError::ApplyPreconditionNotMet`], *before* `provider.apply` is
+/// ever reached. This is a hard gate at the mutation boundary itself, not
+/// a check that runs after the fact via an illegal-transition error.
+///
+/// **TOCTOU recheck (audit Finding 2)**: the immediate-pre-Apply revision
+/// recheck ([`revalidate_immediately_before_apply`]) is folded directly
+/// into this function's own entry path, unconditionally -- so no caller,
+/// including any future recovery/resume orchestration built on top of
+/// [`crate::transaction::recovery::classify`], can reach the provider call
+/// while skipping it, regardless of how this record arrived at a
+/// nominally-Authorized/in-flight state (e.g. after being reconstructed
+/// from persisted historical state whose arbitration data may since have
+/// changed).
+///
+/// **Durable Apply-intent (audit Finding 3, G4 handoff §19.1)**: the
+/// Apply-intent record is durably persisted (via
+/// [`crate::transaction::persistence::persist`], which itself performs a
+/// real fsync/atomic-rename durability barrier) *before* `provider.apply`
+/// is invoked. If that persist call fails, `provider.apply` is not called
+/// at all and [`EngineError::PersistenceFailed`] is returned. The
+/// Apply-outcome is durably persisted again immediately after the
+/// provider call resolves.
+///
 /// # Errors
 ///
 /// See variants above; [`EngineError::MustObserveBeforeRetry`] specifically
@@ -263,8 +314,32 @@ fn parse_apply_payload(raw: &guardian_provider_api::ApplyOutcome) -> ApplyOutcom
 pub fn apply<P: MutableCapabilityAdapter>(
     record: &mut TransactionRecord,
     provider: &P,
+    state_source: &impl ArbitrationStateSource,
+    persist_dir: &Path,
     clock: u64,
 ) -> Result<(), EngineError> {
+    let existing_outcome = record
+        .apply_record
+        .as_ref()
+        .map(|existing| existing.outcome);
+    let entry_permitted = matches!(
+        (record.state, existing_outcome),
+        (TransactionState::Authorized, _)
+            | (TransactionState::Applying, Some(_))
+            | (
+                TransactionState::Observing,
+                Some(ApplyOutcome::ConfirmedSuccess)
+            )
+    );
+    if !entry_permitted {
+        return Err(EngineError::ApplyPreconditionNotMet(record.state));
+    }
+
+    // Immediate-pre-Apply TOCTOU recheck -- enforced unconditionally as
+    // part of Apply's own entry path (see doc comment above); never a
+    // separate step a caller could forget or skip.
+    revalidate_immediately_before_apply(record, state_source)?;
+
     if record.state == TransactionState::Authorized {
         record.transition_to(TransactionState::Applying)?;
     }
@@ -280,15 +355,21 @@ pub fn apply<P: MutableCapabilityAdapter>(
             ApplyOutcome::NotRecorded => {}
         }
     } else {
-        // Apply-intent durably recorded before the provider is ever
-        // invoked (§19.1 step 2) -- callers that want to prove the
-        // persistence ordering persist `record` to disk here, before this
-        // function returns and before the provider call below runs.
         record.apply_record = Some(ApplyRecord::intent_only(
             record.idempotency_key.clone(),
             clock,
         ));
     }
+
+    // Durable Apply-intent (§19.1 steps 2-3): a real persist call, with a
+    // real durability barrier inside `persist` itself, executed *before*
+    // the provider is ever invoked. Persistence failure here means the
+    // provider MUST NOT be called.
+    persist(
+        persist_dir,
+        &PersistedTransactionRecord::from_record(record),
+    )
+    .map_err(|error| EngineError::PersistenceFailed(error.to_string()))?;
 
     let action = ActionRequest(record.idempotency_key.clone());
     let outcome = match provider.apply(&action) {
@@ -309,6 +390,14 @@ pub fn apply<P: MutableCapabilityAdapter>(
         }
         ApplyOutcome::NotRecorded | ApplyOutcome::ResponseLostOrUnknown => {}
     }
+
+    // Durable Apply-outcome (§19.1 step 5).
+    persist(
+        persist_dir,
+        &PersistedTransactionRecord::from_record(record),
+    )
+    .map_err(|error| EngineError::PersistenceFailed(error.to_string()))?;
+
     Ok(())
 }
 
@@ -318,9 +407,21 @@ pub fn apply<P: MutableCapabilityAdapter>(
 /// only overwrites what was *durably recorded* about its outcome, exactly
 /// modeling "the process crashed after invoking the provider but before
 /// persisting the result" (G4 handoff §19.1, crash between step 4 and 5).
+///
+/// Also resets `state` back to `Applying` when it had already advanced to
+/// `Observing`: `ResponseLostOrUnknown` never legitimately coexists with a
+/// state that has already advanced past `Applying` -- a real crash at this
+/// boundary means the in-memory advancement to `Observing` itself would
+/// not exist on reload (only the durably-fsynced Apply-intent record
+/// would), so this directly models what a genuine restart would show,
+/// rather than a state combination `apply`'s own entry gate would never
+/// legitimately produce.
 pub fn simulate_response_lost(record: &mut TransactionRecord) {
     if let Some(existing) = record.apply_record.as_mut() {
         existing.outcome = ApplyOutcome::ResponseLostOrUnknown;
+    }
+    if record.state == TransactionState::Observing {
+        record.state = TransactionState::Applying;
     }
 }
 

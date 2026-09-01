@@ -20,7 +20,7 @@ use guardian_core::transaction::engine::{
 };
 use guardian_core::transaction::record::ActionType;
 use guardian_core::transaction::{
-    RollbackOutcome, TransactionId, TransactionRecord, TransactionState,
+    ApplyRecord, RollbackOutcome, TransactionId, TransactionRecord, TransactionState,
 };
 use guardian_provider_api::{
     ActionRequest, ApplyOutcome as RawApplyOutcome, Availability, BootAvailability, CapabilityId,
@@ -285,6 +285,17 @@ fn subject() -> CallerIdentity {
     CallerIdentity::new(":1.42", Some(1000))
 }
 
+/// A scratch persistence directory shared by every test in this file --
+/// safe to share because every `TransactionRecord` uses a freshly
+/// generated `TransactionId`, so persisted filenames never collide across
+/// tests even when they run concurrently in the same process.
+fn scratch_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "guardian-g4-engine-contract-{}",
+        std::process::id()
+    ))
+}
+
 /// Drives a transaction from `Created` through `Authorized`, ready for
 /// `Apply` -- the shared happy-path setup every Apply/Observe/Rollback test
 /// starts from.
@@ -315,13 +326,14 @@ fn p0_txn_001_happy_path_reaches_committed_only_through_valid_transitions() {
     let mut record = new_record();
     let provider = FixtureAdapter::new();
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
     assert_eq!(record.state, TransactionState::Authorized);
 
     revalidate_immediately_before_apply(&record, &state_source).unwrap();
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     assert_eq!(record.state, TransactionState::Observing);
 
     observe(&mut record, &provider).unwrap();
@@ -329,6 +341,207 @@ fn p0_txn_001_happy_path_reaches_committed_only_through_valid_transitions() {
     assert_eq!(record.state, TransactionState::Committed);
     assert_eq!(record.commit_result, Some(true));
     assert_eq!(provider.apply_calls.get(), 1);
+}
+
+// ---------------------------------------------------------------------
+// Independent-audit repair: Finding 1 -- apply() must enforce its own
+// preconditions. Reproduces the exact audit finding: a CREATED-state
+// record passed directly to apply() previously reached provider.apply()
+// before any state-machine check could reject it. These tests prove the
+// mutation boundary itself now gates entry, with the illegal state never
+// getting anywhere near the provider.
+// ---------------------------------------------------------------------
+
+#[test]
+fn finding1_apply_from_created_state_is_rejected_before_any_provider_call() {
+    let mut record = new_record();
+    let provider = FixtureAdapter::new();
+    let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
+
+    assert_eq!(record.state, TransactionState::Created);
+    let result = apply(&mut record, &provider, &state_source, &dir, 1);
+
+    assert_eq!(
+        result,
+        Err(EngineError::ApplyPreconditionNotMet(
+            TransactionState::Created
+        ))
+    );
+    assert_eq!(
+        provider.apply_calls.get(),
+        0,
+        "provider.apply() must never be reached from a non-Authorized state"
+    );
+    assert_eq!(
+        record.state,
+        TransactionState::Created,
+        "state must remain exactly as it was -- no partial/illegal transition"
+    );
+}
+
+#[test]
+fn finding1_apply_from_validating_state_is_rejected_before_any_provider_call() {
+    let mut record = new_record();
+    let provider = FixtureAdapter::new();
+    let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
+
+    record.transition_to(TransactionState::Validating).unwrap();
+    let result = apply(&mut record, &provider, &state_source, &dir, 1);
+
+    assert_eq!(
+        result,
+        Err(EngineError::ApplyPreconditionNotMet(
+            TransactionState::Validating
+        ))
+    );
+    assert_eq!(provider.apply_calls.get(), 0);
+    assert_eq!(record.state, TransactionState::Validating);
+}
+
+/// A terminal state (`Rejected`) must reject `apply()`, not silently permit
+/// it or a duplicate-outcome no-op -- distinct from the legitimate
+/// `Observing`+`ConfirmedSuccess` idempotent-retry case.
+#[test]
+fn finding1_apply_from_rejected_terminal_state_is_rejected_before_any_provider_call() {
+    let mut record = new_record();
+    let provider = FixtureAdapter::new();
+    let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
+
+    record.transition_to(TransactionState::Validating).unwrap();
+    record.transition_to(TransactionState::Rejected).unwrap();
+    let result = apply(&mut record, &provider, &state_source, &dir, 1);
+
+    assert_eq!(
+        result,
+        Err(EngineError::ApplyPreconditionNotMet(
+            TransactionState::Rejected
+        ))
+    );
+    assert_eq!(provider.apply_calls.get(), 0);
+    assert_eq!(record.state, TransactionState::Rejected);
+}
+
+/// `Applying` state alone, with no `apply_record` ever set (i.e. no
+/// legitimate prior Apply-intent), must also be rejected -- a record that
+/// merely *looks* mid-Apply via a bare state field is not proof an intent
+/// was ever durably recorded. Proves the gate checks `apply_record`, not
+/// only `state`.
+#[test]
+fn finding1_apply_from_bare_applying_state_with_no_apply_record_is_rejected() {
+    let mut record = new_record();
+    let provider = FixtureAdapter::new();
+    let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
+
+    record.transition_to(TransactionState::Validating).unwrap();
+    record.transition_to(TransactionState::Validated).unwrap();
+    record.transition_to(TransactionState::Authorizing).unwrap();
+    record.transition_to(TransactionState::Authorized).unwrap();
+    record.transition_to(TransactionState::Applying).unwrap();
+    assert!(record.apply_record.is_none());
+
+    let result = apply(&mut record, &provider, &state_source, &dir, 1);
+
+    assert_eq!(
+        result,
+        Err(EngineError::ApplyPreconditionNotMet(
+            TransactionState::Applying
+        ))
+    );
+    assert_eq!(provider.apply_calls.get(), 0);
+}
+
+/// `ConfirmedFailureNoMutation` (a real, completed Apply attempt that
+/// determined `Failed`) must also be rejected on a subsequent `apply()` call
+/// -- not silently treated as an idempotent no-op the way a genuinely
+/// successful duplicate is. Directly closes the audit's Q2/Finding-1
+/// overlap and the non-blocking "missing dedicated test" finding.
+#[test]
+fn finding1_duplicate_apply_after_confirmed_failure_no_mutation_is_rejected_state_stays_failed() {
+    let mut record = new_record();
+    let provider = FixtureAdapter::new();
+    provider.apply_behavior.set(ApplyBehavior::CleanFailure);
+    let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
+    let authorizer = FixtureAuthorizer::granting();
+
+    drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
+    assert_eq!(record.state, TransactionState::Failed);
+    assert_eq!(provider.apply_calls.get(), 1);
+
+    let retry_result = apply(&mut record, &provider, &state_source, &dir, 2);
+
+    assert_eq!(
+        retry_result,
+        Err(EngineError::ApplyPreconditionNotMet(
+            TransactionState::Failed
+        )),
+        "a duplicate apply() call must be rejected, not silently returned as Ok(())"
+    );
+    assert_eq!(
+        provider.apply_calls.get(),
+        1,
+        "provider.apply() must not be invoked a second time"
+    );
+    assert_eq!(
+        record.state,
+        TransactionState::Failed,
+        "the original failure must remain observable -- never converted toward Committed"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Independent-audit repair: Finding 2 -- recovery must not provide an
+// unsafe resume path. `classify()` remains a pure classifier (unchanged);
+// this proves the *executable* path into apply() cannot skip a fresh
+// revision recheck even when the record's own in-memory state nominally
+// looks resumable (Authorized, with a real prior pre_state) -- exactly
+// the shape a naive "SafeToResume -> apply()" caller would produce if it
+// reused stale persisted/historical arbitration data instead of
+// re-deriving revision from the live ArbitrationStateSource.
+// ---------------------------------------------------------------------
+
+#[test]
+fn finding2_recovered_authorized_record_with_stale_revision_cannot_reach_provider_mutation() {
+    let mut record = new_record();
+    let provider = FixtureAdapter::new();
+    let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
+    let authorizer = FixtureAuthorizer::granting();
+
+    // Legitimately reaches Authorized with a real pre_state/arbitration_result
+    // captured at revision 1 -- exactly what a "recovered" in-memory record
+    // reconstructed from persisted historical state would also look like.
+    drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
+    assert_eq!(record.state, TransactionState::Authorized);
+
+    // The authoritative state source's revision has since changed --
+    // simulating "time passed since this was authorized/persisted, and
+    // ownership/candidates were re-arbitrated in the meantime" -- without
+    // touching `record` itself in any way.
+    state_source.bump_revision();
+
+    let result = apply(&mut record, &provider, &state_source, &dir, 1);
+
+    assert_eq!(
+        result,
+        Err(EngineError::StaleRevision),
+        "apply() must independently re-derive revision, not trust the Authorized state alone"
+    );
+    assert_eq!(
+        provider.apply_calls.get(),
+        0,
+        "a stale-revision record must never reach provider.apply(), regardless of how it arrived at Authorized"
+    );
+    assert_eq!(
+        record.state,
+        TransactionState::Authorized,
+        "the block must occur before any state transition toward Applying"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -420,10 +633,11 @@ fn p0_txn_004_clean_apply_failure_reaches_failed_no_mutation() {
     let provider = FixtureAdapter::new();
     provider.apply_behavior.set(ApplyBehavior::CleanFailure);
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     assert_eq!(record.state, TransactionState::Failed);
 }
 
@@ -433,10 +647,11 @@ fn p0_txn_004_partial_uncertain_apply_failure_enters_rolling_back() {
     let provider = FixtureAdapter::new();
     provider.apply_behavior.set(ApplyBehavior::PartialUncertain);
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     assert_eq!(record.state, TransactionState::RollingBack);
 }
 
@@ -450,10 +665,11 @@ fn p0_txn_005_provider_success_followed_by_failed_observation_does_not_commit() 
     let provider = FixtureAdapter::new();
     provider.observe_behavior.set(ObserveBehavior::NotMet);
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     observe(&mut record, &provider).unwrap();
     let result = confirm(&mut record);
     assert!(result.is_ok());
@@ -474,10 +690,11 @@ fn p0_txn_006_native_rollback_confirmed_reaches_rolled_back() {
         .rollback_behavior
         .set(RollbackBehavior::ConfirmedRestored);
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     rollback(&mut record, &provider, RollbackKind::Native).unwrap();
     assert_eq!(record.state, TransactionState::RolledBack);
     assert_eq!(
@@ -495,10 +712,11 @@ fn emulated_rollback_confirmed_reaches_rolled_back() {
         .rollback_behavior
         .set(RollbackBehavior::ConfirmedRestored);
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     rollback(&mut record, &provider, RollbackKind::Emulated).unwrap();
     assert_eq!(record.state, TransactionState::RolledBack);
     assert_eq!(
@@ -516,10 +734,11 @@ fn best_effort_rollback_confirmed_reaches_rolled_back() {
         .rollback_behavior
         .set(RollbackBehavior::ConfirmedRestored);
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     rollback(&mut record, &provider, RollbackKind::BestEffort).unwrap();
     assert_eq!(record.state, TransactionState::RolledBack);
     assert_eq!(
@@ -540,10 +759,11 @@ fn best_effort_rollback_unconfirmed_reaches_rollback_failed_not_rolled_back() {
         .rollback_behavior
         .set(RollbackBehavior::AttemptedUnconfirmed);
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     rollback(&mut record, &provider, RollbackKind::BestEffort).unwrap();
     assert_eq!(record.state, TransactionState::RollbackFailed);
     assert_ne!(record.state, TransactionState::RolledBack);
@@ -562,10 +782,11 @@ fn p0_txn_007_explicit_rollback_failure_reaches_rollback_failed() {
         .rollback_behavior
         .set(RollbackBehavior::ConfirmedFailed);
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     rollback(&mut record, &provider, RollbackKind::BestEffort).unwrap();
     assert_eq!(record.state, TransactionState::RollbackFailed);
     assert_eq!(
@@ -599,10 +820,11 @@ fn rollback_kind_none_never_reaches_rolled_back() {
     let provider = FixtureAdapter::new();
     provider.apply_behavior.set(ApplyBehavior::PartialUncertain);
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     rollback(&mut record, &provider, RollbackKind::None).unwrap();
     assert_eq!(record.state, TransactionState::RollbackFailed);
     assert_ne!(record.state, TransactionState::RolledBack);
@@ -618,10 +840,11 @@ fn p0_txn_008_committed_transaction_cannot_re_enter_applying() {
     let mut record = new_record();
     let provider = FixtureAdapter::new();
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     observe(&mut record, &provider).unwrap();
     confirm(&mut record).unwrap();
     assert_eq!(record.state, TransactionState::Committed);
@@ -640,10 +863,11 @@ fn p0_txn_009_same_idempotency_key_never_invokes_apply_twice_after_response_loss
     let mut record = new_record();
     let provider = FixtureAdapter::new();
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     assert_eq!(provider.apply_calls.get(), 1);
     assert_eq!(record.state, TransactionState::Observing);
 
@@ -655,7 +879,7 @@ fn p0_txn_009_same_idempotency_key_never_invokes_apply_twice_after_response_loss
     // Retry with the same idempotency_key -- must NOT call apply() again,
     // and must NOT report success merely because APPLYING/an ApplyRecord
     // exists.
-    let retry_result = apply(&mut record, &provider, 2);
+    let retry_result = apply(&mut record, &provider, &state_source, &dir, 2);
     assert_eq!(retry_result, Err(EngineError::MustObserveBeforeRetry));
     assert_eq!(
         provider.apply_calls.get(),
@@ -683,15 +907,16 @@ fn known_completed_apply_is_not_re_invoked_on_retry() {
     let mut record = new_record();
     let provider = FixtureAdapter::new();
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     assert_eq!(provider.apply_calls.get(), 1);
 
     // A second call to apply() with the outcome already ConfirmedSuccess
     // must be a no-op, not a second real invocation.
-    apply(&mut record, &provider, 2).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 2).unwrap();
     assert_eq!(provider.apply_calls.get(), 1);
 }
 
@@ -725,10 +950,11 @@ fn p0_txn_012_client_disconnect_does_not_lose_the_audit_record() {
     let mut record = new_record();
     let provider = FixtureAdapter::new();
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     observe(&mut record, &provider).unwrap();
     confirm(&mut record).unwrap();
 
@@ -886,16 +1112,22 @@ fn cancellation_requested_during_applying_does_not_short_circuit_reconciliation(
     let mut record = new_record();
     let provider = FixtureAdapter::new();
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
     record.transition_to(TransactionState::Applying).unwrap();
+    // A real Apply-intent already durably exists (state Applying, outcome
+    // NotRecorded) -- the legitimate entry condition apply()'s precondition
+    // gate requires for a retry, faithfully modeling "Apply is genuinely
+    // in progress" rather than an empty/never-attempted Applying state.
+    record.apply_record = Some(ApplyRecord::intent_only(record.idempotency_key.clone(), 0));
     request_cancellation(&mut record).unwrap();
     assert_ne!(record.state, TransactionState::Cancelled);
     assert_eq!(record.state, TransactionState::Applying);
     assert!(record.cancellation_requested);
 
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     observe(&mut record, &provider).unwrap();
     confirm(&mut record).unwrap();
     assert_eq!(
@@ -914,14 +1146,16 @@ fn expiry_requested_during_applying_does_not_short_circuit_reconciliation() {
     let mut record = new_record();
     let provider = FixtureAdapter::new();
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
     record.transition_to(TransactionState::Applying).unwrap();
+    record.apply_record = Some(ApplyRecord::intent_only(record.idempotency_key.clone(), 0));
     request_expiry(&mut record).unwrap();
     assert_ne!(record.state, TransactionState::Expired);
 
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     assert_ne!(record.state, TransactionState::Expired);
     assert!(record.deadline_expired);
 }
@@ -932,10 +1166,11 @@ fn cancellation_requested_during_rolling_back_does_not_bypass_rollback_reconcili
     let provider = FixtureAdapter::new();
     provider.apply_behavior.set(ApplyBehavior::PartialUncertain);
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     assert_eq!(record.state, TransactionState::RollingBack);
 
     request_cancellation(&mut record).unwrap();
@@ -959,10 +1194,11 @@ fn expiry_requested_during_rolling_back_does_not_bypass_rollback_reconciliation(
         .rollback_behavior
         .set(RollbackBehavior::ConfirmedFailed);
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     request_expiry(&mut record).unwrap();
     assert_eq!(record.state, TransactionState::RollingBack);
 
@@ -979,10 +1215,11 @@ fn cancellation_or_expiry_requested_then_transaction_reaches_committed_stands() 
     let mut record = new_record();
     let provider = FixtureAdapter::new();
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     request_cancellation(&mut record).unwrap();
     request_expiry(&mut record).unwrap();
     observe(&mut record, &provider).unwrap();
@@ -1007,10 +1244,11 @@ fn provider_apply_unsupported_is_treated_as_clean_failure_not_silently_ignored()
     let provider = FixtureAdapter::new();
     provider.apply_behavior.set(ApplyBehavior::Unsupported);
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     assert_eq!(record.state, TransactionState::Failed);
 }
 
@@ -1020,10 +1258,11 @@ fn provider_observe_unsupported_is_treated_as_ambiguous_never_as_success() {
     let provider = FixtureAdapter::new();
     provider.observe_behavior.set(ObserveBehavior::Ambiguous);
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     let observation = observe(&mut record, &provider).unwrap();
     assert_eq!(
         observation,
@@ -1043,10 +1282,11 @@ fn provider_rollback_unsupported_reaches_rollback_failed_via_not_supported() {
         .rollback_behavior
         .set(RollbackBehavior::Unsupported);
     let state_source = FixtureStateSource::single_healthy_writer();
+    let dir = scratch_dir();
     let authorizer = FixtureAuthorizer::granting();
 
     drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
-    apply(&mut record, &provider, 1).unwrap();
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
     rollback(&mut record, &provider, RollbackKind::Native).unwrap();
     assert_eq!(record.state, TransactionState::RollbackFailed);
     assert_eq!(record.rollback_result, Some(RollbackOutcome::NotSupported));

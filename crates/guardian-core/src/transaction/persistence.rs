@@ -14,13 +14,17 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use guardian_provider_api::{CapabilityId, ProviderId};
 
 use crate::transaction::apply::ApplyOutcome;
 use crate::transaction::id::TransactionId;
+use crate::transaction::observation::ObservationOutcome;
+use crate::transaction::record::TransactionRecord;
+use crate::transaction::recovery::RecoverySnapshot;
 use crate::transaction::rollback::RollbackOutcome;
 use crate::transaction::state::TransactionState;
 
@@ -39,9 +43,63 @@ pub struct PersistedTransactionRecord {
     pub state: TransactionState,
     pub arbitration_revision: Option<u64>,
     pub apply_outcome: Option<ApplyOutcome>,
+    /// The most recent `Observe` result, if any -- required to classify a
+    /// reloaded `Observing`-state record via
+    /// [`crate::transaction::recovery::classify`] using real persisted
+    /// evidence rather than only the fail-closed "no observation recorded"
+    /// default (closes the audit's persistence/recovery integration gap).
+    pub last_observation: Option<ObservationOutcome>,
     pub rollback_result: Option<RollbackOutcome>,
     pub cancellation_requested: bool,
     pub deadline_expired: bool,
+}
+
+impl PersistedTransactionRecord {
+    /// Projects the fields of a live [`TransactionRecord`] this gate's
+    /// persistence/recovery contract actually needs -- not a general
+    /// serialization of every nested field (see module docs).
+    #[must_use]
+    pub fn from_record(record: &TransactionRecord) -> Self {
+        let arbitration_revision = record
+            .arbitration_result
+            .as_ref()
+            .map(|decision| decision.revision)
+            .or_else(|| {
+                record
+                    .pre_state
+                    .as_ref()
+                    .map(|snapshot| snapshot.arbitration_result.revision)
+            });
+        Self {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            transaction_id: record.transaction_id.clone(),
+            idempotency_key: record.idempotency_key.clone(),
+            capability_id: record.capability_id.clone(),
+            provider_id: record.provider_id.clone(),
+            state: record.state,
+            arbitration_revision,
+            apply_outcome: record.apply_record.as_ref().map(|apply| apply.outcome),
+            last_observation: record.observations.last().copied(),
+            rollback_result: record.rollback_result,
+            cancellation_requested: record.cancellation_requested,
+            deadline_expired: record.deadline_expired,
+        }
+    }
+
+    /// Projects onto exactly the inputs
+    /// [`crate::transaction::recovery::classify`] needs -- the integrated
+    /// "load a real persisted record, then classify it" flow the audit
+    /// found untested (a corrupt or unparseable record never reaches this
+    /// method at all: [`load`]/[`load_all`] fail closed with
+    /// [`LoadError`] before a [`RecoverySnapshot`] can be constructed).
+    #[must_use]
+    pub const fn to_recovery_snapshot(&self) -> RecoverySnapshot {
+        RecoverySnapshot {
+            state: self.state,
+            apply_outcome: self.apply_outcome,
+            last_observation: self.last_observation,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -94,6 +152,9 @@ fn serialize(record: &PersistedTransactionRecord) -> String {
     }
     if let Some(outcome) = record.apply_outcome {
         lines.push(format!("apply_outcome={outcome}"));
+    }
+    if let Some(observation) = record.last_observation {
+        lines.push(format!("last_observation={observation}"));
     }
     if let Some(rollback) = record.rollback_result {
         lines.push(format!("rollback_result={rollback}"));
@@ -159,6 +220,16 @@ fn deserialize(text: &str) -> Result<PersistedTransactionRecord, LoadError> {
             )
         })
         .transpose()?;
+    let last_observation = fields
+        .get("last_observation")
+        .map(|value| {
+            Ok::<_, LoadError>(
+                value
+                    .parse::<ObservationOutcome>()
+                    .unwrap_or(ObservationOutcome::Ambiguous),
+            )
+        })
+        .transpose()?;
     let rollback_result = fields
         .get("rollback_result")
         .map(|value| {
@@ -179,6 +250,7 @@ fn deserialize(text: &str) -> Result<PersistedTransactionRecord, LoadError> {
         state,
         arbitration_revision,
         apply_outcome,
+        last_observation,
         rollback_result,
         cancellation_requested,
         deadline_expired,
@@ -189,13 +261,34 @@ fn record_path(directory: &Path, transaction_id: &TransactionId) -> PathBuf {
     directory.join(format!("{transaction_id}.txn"))
 }
 
-/// Atomically persists `record` under `directory` -- write-to-temp-file
-/// then rename, so a crash mid-write never leaves a readable partial
-/// record (G4 handoff §19).
+/// Persists `record` under `directory` with the real durability guarantee
+/// G4 handoff §19.1 step 3 requires -- not atomicity alone. Exactly three
+/// operations are performed, and this is the complete guarantee (no
+/// stronger, no weaker):
+///
+/// 1. the temp file's contents are written and **`fsync`'d** (`sync_all`)
+///    before anything else happens, so the bytes that will become the
+///    published record are durable on disk first;
+/// 2. the temp file is atomically renamed onto the final path (POSIX
+///    `rename` -- a reader can only ever observe the old complete record or
+///    the new complete record, never a partial one);
+/// 3. the containing directory is itself **`fsync`'d** after the rename,
+///    because POSIX does not guarantee a rename's directory-entry update
+///    is durable on its own -- without this, a power loss immediately
+///    after a "successful" rename could still lose the new directory
+///    entry on some filesystems/mount options.
+///
+/// This does not guarantee anything about `directory`'s own ancestors, and
+/// it is a synchronous, blocking durability barrier (deliberately -- this
+/// gate does not implement async I/O or a write-behind journal; see G4
+/// handoff §19).
 ///
 /// # Errors
 ///
-/// Returns [`PersistenceError`] on any I/O failure.
+/// Returns [`PersistenceError`] on any I/O failure, including a failure of
+/// either `fsync` step -- callers (see
+/// [`crate::transaction::engine::apply`]) must treat that identically to
+/// any other persistence failure and must not proceed past it.
 pub fn persist(
     directory: &Path,
     record: &PersistedTransactionRecord,
@@ -203,9 +296,24 @@ pub fn persist(
     fs::create_dir_all(directory).map_err(|error| PersistenceError(error.to_string()))?;
     let final_path = record_path(directory, &record.transaction_id);
     let temp_path = directory.join(format!("{}.txn.tmp", record.transaction_id));
-    fs::write(&temp_path, serialize(record))
-        .map_err(|error| PersistenceError(error.to_string()))?;
+
+    {
+        let mut file =
+            File::create(&temp_path).map_err(|error| PersistenceError(error.to_string()))?;
+        file.write_all(serialize(record).as_bytes())
+            .map_err(|error| PersistenceError(error.to_string()))?;
+        file.sync_all()
+            .map_err(|error| PersistenceError(error.to_string()))?;
+    }
+
     fs::rename(&temp_path, &final_path).map_err(|error| PersistenceError(error.to_string()))?;
+
+    let directory_handle =
+        File::open(directory).map_err(|error| PersistenceError(error.to_string()))?;
+    directory_handle
+        .sync_all()
+        .map_err(|error| PersistenceError(error.to_string()))?;
+
     Ok(())
 }
 
