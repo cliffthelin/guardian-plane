@@ -118,6 +118,36 @@ impl fmt::Display for RollbackKind {
     }
 }
 
+/// An unrecognized `RollbackKind` wire token -- there is no `Unknown`
+/// variant on this enum, so an unrecognized value fails closed with a typed
+/// parse error rather than silently defaulting to any of the four known
+/// kinds (added when G4's persistence contract became the first real
+/// boundary this type crosses -- TDD contract §23 / G4 handoff NB-3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RollbackKindParseError;
+
+impl fmt::Display for RollbackKindParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("unrecognized rollback_kind wire token")
+    }
+}
+
+impl std::error::Error for RollbackKindParseError {}
+
+impl std::str::FromStr for RollbackKind {
+    type Err = RollbackKindParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(match value {
+            "native" => Self::Native,
+            "emulated" => Self::Emulated,
+            "best_effort" => Self::BestEffort,
+            "none" => Self::None,
+            _ => return Err(RollbackKindParseError),
+        })
+    }
+}
+
 /// Arbitrates a single capability's write ownership. Deterministic:
 /// identical `input` (regardless of `input.candidates` order) always
 /// produces an identical [`ArbitrationDecision`] -- resolution depends only

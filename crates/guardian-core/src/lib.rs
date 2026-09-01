@@ -7,3 +7,4 @@ pub mod event;
 pub mod identity;
 pub mod incident;
 pub mod risk;
+pub mod transaction;
