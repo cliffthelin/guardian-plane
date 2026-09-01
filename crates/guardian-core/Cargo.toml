@@ -6,6 +6,7 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+guardian-provider-api = { path = "../guardian-provider-api" }
 zbus.workspace = true
 
 [dev-dependencies]
