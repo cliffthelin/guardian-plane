@@ -31,24 +31,34 @@ Decision record:    docs/adr/ADR-006-guardian-indicator-mechanism.md
 Status:             Accepted
 ```
 
-Candidate 1 (legacy GTK3 Ayatana AppIndicator) and candidate 2
-(GLib-only Ayatana AppIndicator 2.x) were both disqualified by real,
-directly-evidenced failures against §30's required-test list — an
-X11/XWayland dependency on GNOME 50/Wayland for candidate 1, and a
-menu-protocol incompatibility with both required desktops' actual
-indicator-rendering code for candidate 2. `ksni` passes every required
-test directly evidenced against it, on both GNOME 50 and Xfce 4.20, and
-is selected on that basis.
+Candidate 2 (GLib-only Ayatana AppIndicator 2.x) was disqualified by a
+real, directly-evidenced menu-protocol incompatibility with both
+required desktops' actual indicator-rendering code. **Candidate 1
+(legacy GTK3 Ayatana AppIndicator) is not disqualified** — after repair
+(see revision note below), it passes every required §30 test on both
+desktops. `ksni` was selected over candidate 1 not because candidate 1
+fails a required test, but on evidenced simplicity grounds (no broken
+upstream Rust binding, no GTK3 dependency, no non-default launch
+environment requirement, no extra API call needed for status visuals —
+see `G6_CANDIDATE_COMPARISON.md`'s comparison table).
 
-**Revision note:** an independent audit of an earlier version of this
-record found it, and the accompanying ADR-006, used "Accepted —
-conditional selection" language in a way that functioned as a substitute
-for a required PASS, while the Xfce menu-open result was genuinely
-UNRESOLVED and several other required tests were untested. A closure
-pass (documented in `G6_CANDIDATE_COMPARISON.md`'s revision history and
-the four closure documents it cites) resolved every one of those items
-with real evidence; this record now reflects that outcome. Full
-reasoning: `ADR-006`.
+**Revision note (two rounds, both preserved):**
+
+1. An independent audit of an earlier version of this record found it,
+   and the accompanying ADR-006, used "Accepted — conditional selection"
+   language in a way that functioned as a substitute for a required
+   PASS, while the Xfce menu-open result was genuinely UNRESOLVED and
+   several other required tests were untested. A closure pass resolved
+   every one of those items with real evidence.
+2. A further independent audit of that closed state found the
+   candidate-1 "structural X11/XWayland dependency" disqualification
+   unsupported (live re-execution showed it runs correctly under
+   `GDK_BACKEND=wayland`, a launch configuration never tried originally)
+   and found "reconnect after daemon restart" conflated with
+   indicator-process restart for `ksni` on Xfce. Both were repaired with
+   real re-testing -- see `G6_CANDIDATE1_REPAIR_EVIDENCE.md` and
+   `G6_KSNI_XFCE_DAEMON_RESTART_REPAIR.md`. This record and `ADR-006`
+   now reflect that outcome. Full reasoning: `ADR-006`.
 
 ## Evidence-gathering method
 
@@ -58,7 +68,7 @@ All evidence was gathered against real, disposable GNOME 50 and Xfce
 fixtures) — never against the primary workstation, and never inferred
 from library documentation alone. Every VM was torn down and its overlay
 disk destroyed after evidence capture; base cloud images were never
-written to. Eleven checkpoint documents record this work in full, each
+written to. Thirteen checkpoint documents record this work in full, each
 with explicit environment details, real captured process output, and
 provenance-labeled screenshots:
 
@@ -73,6 +83,8 @@ docs/evidence/g6/G6_XFCE_RECONNECT_EVIDENCE.md
 docs/evidence/g6/G6_LOGOUT_LOGIN_LIFECYCLE_EVIDENCE.md
 docs/evidence/g6/G6_DAEMON_UNAVAILABLE_EVIDENCE.md
 docs/evidence/g6/G6_ICON_NAME_CORRECTION.md
+docs/evidence/g6/G6_CANDIDATE1_REPAIR_EVIDENCE.md
+docs/evidence/g6/G6_KSNI_XFCE_DAEMON_RESTART_REPAIR.md
 docs/evidence/g6/G6_CANDIDATE_COMPARISON.md   (consolidated matrix)
 ```
 
@@ -89,9 +101,8 @@ state/icon update propagates          GNOME PASS / Xfce PASS
 no X11 dependency                     GNOME PASS / Xfce N/A (X11 by design)
 reconnect after panel/Shell restart   GNOME PASS / Xfce PASS
 reconnect after daemon restart        GNOME PASS / Xfce PASS
-daemon unavailable shows degraded     GNOME PASS (real stub-based detection) /
-                                       Xfce minor residual (mechanism proven,
-                                       icon not separately re-screenshotted)
+daemon unavailable shows degraded     GNOME PASS / Xfce PASS (real
+                                       stub-based detection, both desktops)
 no duplicate icon                     GNOME PASS / Xfce PASS
 clean user logout/login lifecycle     GNOME PASS / Xfce PASS
 ```
@@ -101,11 +112,14 @@ clean user logout/login lifecycle     GNOME PASS / Xfce PASS
 Findings that materially affect how the eventual production indicator
 must be built, not just this gate's own scoring:
 
-- **candidate 1's X11/XWayland dependency is structural** — a property
-  of GTK3 itself, not a code defect. Confirms `ksni`'s selection is not
-  merely "simplest," but the only candidate actually free of this
-  dependency, empirically confirmed (launched with no `DISPLAY`/
-  `XAUTHORITY` set, fully functional).
+- **candidate 1's original "structural X11/XWayland dependency" finding
+  was corrected during repair** — the real cause was a launch that never
+  set `GDK_BACKEND=wayland`; under that setting, candidate 1 runs with
+  zero X11/XWayland involvement, confirmed by live reproduction. `ksni`
+  still requires no special launch environment at all on either desktop,
+  which remains a real, evidenced simplicity advantage — but it is not
+  candidate 1's sole disqualifier the way earlier versions of this
+  record stated. See `G6_CANDIDATE1_REPAIR_EVIDENCE.md`.
 - **candidate 2's ecosystem gap is real and ironic** — the library its
   own predecessor's runtime deprecation warning recommends is the one
   candidate that fails to render on either required desktop, because
@@ -140,32 +154,39 @@ must be built, not just this gate's own scoring:
   every StatusNotifierWatcher implementation provides an equivalent
   fallback.
 
-## Open items closed during evidence closure
+## Open items closed during evidence closure and repair
 
-All four items originally carried forward here (Xfce menu-open, Xfce
-reconnect, logout/login lifecycle, daemon-unavailable degraded state)
-were closed with real evidence — see `G6_XFCE_KSNI_MENU_RESOLUTION.md`,
-`G6_XFCE_RECONNECT_EVIDENCE.md`, `G6_LOGOUT_LOGIN_LIFECYCLE_EVIDENCE.md`,
-and `G6_DAEMON_UNAVAILABLE_EVIDENCE.md` respectively.
+- Xfce menu-open, Xfce reconnect, logout/login lifecycle, and
+  daemon-unavailable degraded state (first closure pass) — see
+  `G6_XFCE_KSNI_MENU_RESOLUTION.md`, `G6_XFCE_RECONNECT_EVIDENCE.md`,
+  `G6_LOGOUT_LOGIN_LIFECYCLE_EVIDENCE.md`, and
+  `G6_DAEMON_UNAVAILABLE_EVIDENCE.md`.
+- Candidate 1's no-X11-dependency result, and `ksni`'s Xfce
+  Guardian-daemon-analog-restart evidence, plus the Xfce
+  daemon-unavailable icon screenshot (second, audit-driven repair pass)
+  — see `G6_CANDIDATE1_REPAIR_EVIDENCE.md` and
+  `G6_KSNI_XFCE_DAEMON_RESTART_REPAIR.md`.
 
-## Residual items for G7+ (not blocking this gate's acceptance)
+No residual items remain open from either pass as of this record.
+
+## Residual items for G7+ (design work, not evidence gaps)
 
 ```text
-1. daemon-unavailable icon rendering on Xfce specifically: the detection
-   mechanism and icon-rendering pipeline are both independently proven,
-   but the dialog-error glyph itself was not separately re-screenshotted
-   on Xfce. Low-priority follow-up, not a blocker.
-2. "Daemon unavailable shows degraded state" was evidenced against a
+1. "Daemon unavailable shows degraded state" was evidenced against a
    minimal, explicitly non-production evidence-only D-Bus stub (per the
    G6 handoff's own explicit permission for this) -- wiring the same
    mechanism against the real Guardian daemon's own eventual health
    signal is G7+ protocol-design work.
-3. A stale-registration hazard was found on Xfce (see
+2. A stale-registration hazard was found on Xfce (see
    G6_LOGOUT_LOGIN_LIFECYCLE_EVIDENCE.md): a non-session-scoped
    indicator process can leave a stale icon visible after logout,
    because Xfce's watcher service is per-user, not per-session. G7's
    production indicator must be launched via proper desktop session
    autostart, not as a detached process.
+3. Candidate 1 is a real, evidenced, working fallback if `ksni` is ever
+   reconsidered -- its own complexity costs (broken upstream binding,
+   GTK3 dependency, non-default launch environment), not a functional
+   failure, are why it was not selected.
 ```
 
 ## Scope boundary (restated)
@@ -195,6 +216,8 @@ docs/evidence/g6/G6_XFCE_RECONNECT_EVIDENCE.md
 docs/evidence/g6/G6_LOGOUT_LOGIN_LIFECYCLE_EVIDENCE.md
 docs/evidence/g6/G6_DAEMON_UNAVAILABLE_EVIDENCE.md
 docs/evidence/g6/G6_ICON_NAME_CORRECTION.md
+docs/evidence/g6/G6_CANDIDATE1_REPAIR_EVIDENCE.md
+docs/evidence/g6/G6_KSNI_XFCE_DAEMON_RESTART_REPAIR.md
 docs/evidence/g6/G6_CANDIDATE_COMPARISON.md
 tests/vm/g6-candidate-ksni/
 tests/vm/g6-candidate-ayatana-gtk3/

@@ -1,5 +1,21 @@
 # G6 Evidence Spike — P0-IND-003 (reconnect scenarios) on GNOME 50
 
+> **Correction (added during G6 repair, blocking finding 2 of the
+> independent audit): "Scenario 2" below is mislabeled.** It tests
+> killing and relaunching the **candidate's own process**, not the
+> Guardian-daemon analog. This is real, valuable evidence (kept as-is,
+> not deleted) but it is **indicator-process restart**, a distinct thing
+> from "reconnect after daemon restart" as the contract and the G6
+> handoff's own stub-justification language use that phrase (a
+> Guardian-daemon-analog restarting while the indicator process itself
+> stays alive). The genuinely-correct "daemon restart, indicator alive"
+> scenario for `ksni` on GNOME is `G6_DAEMON_UNAVAILABLE_EVIDENCE.md`
+> (real evidence, indicator pid unchanged throughout); the Xfce
+> equivalent is `G6_KSNI_XFCE_DAEMON_RESTART_REPAIR.md`. For candidate 1,
+> see `G6_CANDIDATE1_REPAIR_EVIDENCE.md`'s "Scenario B" on both desktops.
+> The original text below is preserved unchanged, not rewritten, per the
+> repair brief's history-preservation instruction.
+
 **Status: CHECKPOINT, part of the ongoing G6 candidate comparison.** Covers
 both required P0-IND-003 reconnect sub-scenarios — panel/Shell (watcher)
 restart, and candidate/daemon restart — for the two candidates that pass
@@ -147,7 +163,7 @@ and comes back", even though the mechanism differs from Xfce's.
   -- but it is a real dependency on GNOME-extension-side recovery logic
   that a different desktop environment might not implement.
 
-**Scenario 2 — daemon (candidate process) restart.**
+**Scenario 2 — indicator-process restart (NOT Guardian-daemon restart — see correction notice at top of this document).**
 
 - `kill -TERM` on the candidate pid: `RegisteredStatusNotifierItems`
   immediately returned `[]` -- **clean deregistration, no stale entry.**
@@ -174,7 +190,7 @@ Same two scenarios, same VM, same technique.
   shows the icon present again after the extension disable/enable cycle,
   candidate process untouched, no duplicate.
 
-**Scenario 2 — daemon (candidate process) restart.**
+**Scenario 2 — indicator-process restart (NOT Guardian-daemon restart — see correction notice at top of this document).**
 - `kill -TERM` produced the same clean `RegisteredStatusNotifierItems: []`
   deregistration as ksni.
 - Relaunched candidate (fresh pid): **PASS.**
@@ -188,10 +204,16 @@ Same two scenarios, same VM, same technique.
 
 Established:
 
-- Both P0-IND-003 sub-scenarios (panel/watcher restart, daemon restart)
-  **PASS on GNOME 50 for both candidates that pass icon-appears** (ksni,
-  legacy GTK3 Ayatana AppIndicator). Neither showed a duplicate icon, a
-  stale registration, or a broken menu after either kind of restart.
+- Panel/watcher restart **PASS on GNOME 50 for both candidates that pass
+  icon-appears** (ksni, legacy GTK3 Ayatana AppIndicator). What this
+  document labels "Scenario 2" is real, valuable indicator-process-
+  restart evidence (also PASS, no duplicate icon, no stale registration,
+  no broken menu) but is **not** "reconnect after daemon restart" as the
+  contract means it -- see the correction notice at the top of this
+  document and `G6_DAEMON_UNAVAILABLE_EVIDENCE.md` /
+  `G6_CANDIDATE1_REPAIR_EVIDENCE.md` for the genuinely-correct
+  Guardian-daemon-analog-restart-while-alive evidence (added during G6
+  repair).
 - The GNOME "panel restart" analog genuinely differs from Xfce's (no
   in-place Wayland shell restart exists) and required the
   extension-disable/enable substitution documented above -- worth

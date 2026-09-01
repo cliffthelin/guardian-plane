@@ -1,5 +1,15 @@
 # G6 Evidence Closure — P0-IND-003 reconnect on Xfce 4.20
 
+> **Correction (added during G6 repair, blocking finding 2 of the
+> independent audit): "Scenario B" below is mislabeled.** It tests
+> killing and relaunching `ksni`'s own process, which is
+> **indicator-process restart**, not "Guardian-daemon restart" (a
+> Guardian-daemon analog restarting while the indicator process itself
+> stays alive). The genuinely-correct scenario for `ksni` on Xfce is
+> `G6_KSNI_XFCE_DAEMON_RESTART_REPAIR.md` (real evidence, indicator pid
+> unchanged throughout the daemon-stub kill/relaunch cycle). Original
+> text below preserved unchanged.
+
 **Status: CLOSURE.** Extends `G6_P0_IND_003_RECONNECT_EVIDENCE.md`
 (GNOME-only) to Xfce 4.20, per the independent audit's finding that §30
 lists Xfce as a target environment for the required-test list without a
@@ -72,7 +82,7 @@ state, not `ksni` proactively announcing itself), independently
 confirmed here via process inspection rather than assumed from
 similarity to the GNOME case.
 
-## Scenario B -- daemon/candidate restart
+## Scenario B -- indicator-process restart (NOT Guardian-daemon restart -- see correction notice at top of this document)
 
 **Baseline confirmed:** exactly one registered item, candidate pid 26447.
 
@@ -98,6 +108,13 @@ closure brief required.
 
 ```text
 reconnect after panel/Shell restart   PASS (this closure)
-reconnect after daemon restart        PASS (this closure)
+indicator-process restart             PASS (this closure -- real,
+                                       useful evidence, but NOT credited
+                                       toward "reconnect after daemon
+                                       restart"; see correction notice
+                                       at top of this document)
+reconnect after daemon restart        PASS -- see
+                                       G6_KSNI_XFCE_DAEMON_RESTART_REPAIR.md
+                                       (added during G6 repair)
 no duplicate icon                     PASS (confirmed across both scenarios)
 ```
