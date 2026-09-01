@@ -164,34 +164,62 @@ immediately after G5 and before G7 (production daemon)/G8 (providers)/G9
 (clients). Its separate §39 "Implementation order" list places "Indicator
 compatibility spike and selected implementation" at item 18 -- after the
 daemon skeleton (13), initial providers (14), CLI (15), TUI shell (16),
-and GUI shell (17). **This is a real, unresolved tension in the governing
-contract text itself, not a misreading.** Two honest options, neither of
-which this handoff resolves for you:
+and GUI shell (17). **This is a real tension in the governing contract
+text, not a misreading -- but it resolves cleanly. Treat the gate list as
+authoritative for this project's actual sequencing; §39 is a notional
+build-order checklist, not a binding per-gate dependency graph.**
 
-- Treat the **gate list** as authoritative for *this project's* actual
-  sequencing (G6 comes next, as this handoff's existence implies), and
-  treat §39's later placement as describing a *notional* dependency
-  ordering for a from-scratch project that doesn't apply cleanly to this
-  project's actual gate-by-gate TDD history; or
-- Flag this tension explicitly to whoever is directing gate sequencing
-  before starting G6 implementation, since a real indicator spike
-  arguably benefits from an already-running daemon skeleton (G7) to
-  reconnect to (P0-IND-003 literally requires "reconnect after daemon
-  restart," which is easier to evidence against a real, if minimal,
-  running daemon than against a bare fixture).
+Resolution basis, independently verifiable from this project's own git
+history rather than asserted:
 
-Do not silently resolve this by picking whichever reading is more
-convenient without recording the choice in the completion report -- this
-mirrors the G5 handoff's §5 requirement to record a scope-boundary
-decision explicitly rather than resolve it silently.
+- §45 (Phase 0 exit criteria) and §3 (Phase boundaries) both distinguish
+  "indicator implementation **selected**" (Phase 0/G6, this gate) from
+  the real `guardian-indicator` build (Phase 1/G9, tested by `P1-IND-*`,
+  not `P0-IND-*`) -- the contract's own vocabulary already separates
+  "decide" from "build," independent of §39.
+- §39's own item ordering is demonstrably not a binding G-by-G sequence
+  this project has ever honored, and correctly so: §39 places "privilege
+  topology prototypes and decision" at item 12 -- *after* "transaction
+  engine" (item 8), "diagnostic budget" (item 9), and "recorder" (item
+  10). This project's actual, accepted gate history shows the opposite:
+  `phase0-g2-privilege-topology` was tagged and accepted on 2026-08-31 at
+  16:24, well *before* `phase0-g4-transaction-engine` (20:44) and
+  `phase0-g5-diagnostic-safety` (21:46) the same day -- i.e., G0 through
+  G5 were completed strictly in gate-number order, directly contradicting
+  §39's own item ordering for privilege topology. Since §39 already
+  diverges from this project's real, correct practice at G2, its later
+  placement of the indicator spike (item 18) cannot be read as a hard
+  dependency without the same contradiction recurring here.
+- §38's "no gate advances until all required tests for that gate pass,"
+  combined with the gate list placing G6 before G7, means G7's daemon
+  skeleton (§39 item 13) cannot literally precede G6's completion --
+  reinforcing that §39's item 18 placement cannot be a hard prerequisite
+  without contradicting §38 itself.
+
+**Conclusion: resolution A.** G6 is an early decision/spike gate; the
+*chosen* candidate's full production wiring happens later (G9), mirroring
+G2's own precedent exactly (real prototypes, a real decision, ADR-002,
+production wiring deferred to G7). This is the default reading for this
+gate. Still record the decision explicitly in the completion report
+(mirroring the G5 handoff's §5 requirement) rather than silently assuming
+it -- if you find contract text this handoff missed that changes this
+conclusion, cite it and stop rather than overriding this resolution
+silently.
 
 # 8. Explicit non-goals (do not implement here)
 
 - No real production daemon (`guardian-daemon` skeleton, systemd unit,
-  real D-Bus service registration) unless the §7 tension is resolved in
-  favor of needing one as evidence infrastructure for P0-IND-003 -- and
-  even then, keep it to the minimal skeleton needed to prove "reconnect
-  after daemon restart," not a real G7 daemon.
+  real D-Bus service registration) unless needed as minimal evidence
+  infrastructure for P0-IND-003's "reconnect after daemon restart" claim
+  -- and even then, keep it to the minimal skeleton needed to prove that
+  one claim, not a real G7 daemon. **If such a stub is built, it MUST be
+  explicitly marked non-production** (e.g. a clearly-named scratch crate
+  or module such as `guardian-indicator-evidence-stub`, or a prominent
+  doc comment stating it is disposable G6 evidence infrastructure, not a
+  starting point for G7) and must not be silently adopted, extended, or
+  reused as the real G7 daemon skeleton when that gate begins -- G7 must
+  design its own daemon skeleton from its own governing handoff, not
+  inherit one built to satisfy a single G6 evidence requirement.
 - No GUI/TUI/CLI shell implementation.
 - No real provider (systemd/PSI/logind/UDisks/UPower/AccountsService --
   all G8).
@@ -214,13 +242,28 @@ decision explicitly rather than resolve it silently.
 # 10. TDD sequence
 
 1. Set up the real GNOME 50/Wayland and Xfce 4.20 test environments
-   (VMs, matching G1/G2's `*-vm-setup.sh` precedent) before writing any
-   indicator code.
+   (disposable VMs, matching G1/G2's `*-vm-setup.sh` precedent) before
+   writing any indicator code. Never use a primary/production desktop for
+   this testing.
 2. Run each of the three required candidates against the real required
    test list (§30) on both environments; record real evidence (transcript,
    screenshots/recording references, or equivalent) per candidate per
    environment, matching `docs/evidence/g1/G1_LAYER2_EVIDENCE.md`'s
-   format.
+   format. **Any screenshot or recording MUST carry stated provenance**
+   directly in its filename or an adjacent caption/log line: which
+   candidate build, which environment (GNOME 50 or Xfce 4.20), and when
+   it was captured -- an unlabeled image is not admissible evidence, no
+   matter how real the underlying test was, since it cannot be
+   independently attributed to a specific candidate/environment/run.
+   **After each candidate/environment run, perform and record an explicit
+   teardown step**: remove any autostart entry the candidate installed,
+   revert any shell-extension or panel-plugin change made to test it, and
+   confirm (e.g. via a final screenshot or log line) the VM/session is
+   back to its pre-test baseline before the next candidate is tested or
+   the VM is discarded -- no uncontrolled autostart entry or permanent
+   shell-extension change may be left behind, even on a disposable VM
+   that will itself be discarded, since an intermediate snapshot or clone
+   of that VM could otherwise carry the leftover state forward.
 3. Only after real results exist: write the ADR (`ADR-006`) documenting
    the decision per §30's own selection rule.
 4. If you choose to build the optional decision-logic type from §6, do

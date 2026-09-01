@@ -116,6 +116,22 @@ much Rust code exists.
   claims per §30 ("reconnect after panel/Shell restart" AND "reconnect
   after daemon restart") -- confirm both are separately evidenced, not
   only one.
+- **Provenance:** every screenshot/recording cited as evidence must be
+  directly attributable, via its filename or an adjacent caption/log
+  line, to a specific candidate build, a specific environment (GNOME 50
+  or Xfce 4.20), and a specific capture time. An unlabeled image proves
+  nothing about which candidate or environment it came from -- treat any
+  such unlabeled evidence as equivalent to no evidence for that specific
+  claim, even if the image itself looks real.
+- **Teardown:** confirm each candidate/environment run's evidence
+  includes an explicit teardown record (autostart entries removed, any
+  shell-extension/panel-plugin change reverted, session/VM confirmed back
+  to baseline) before the next candidate was tested or the VM was
+  discarded. Absence of any teardown record is a finding -- flag it even
+  if nothing appears to have gone wrong, since the requirement is about
+  discipline that prevents leftover state from silently propagating
+  through a cloned/snapshotted VM image, not about a specific observed
+  failure.
 
 # 8. Decision-logic audit (only if the candidate built the optional §6 type)
 
@@ -139,14 +155,29 @@ is a finding.
 
 # 10. Implementation-order tension audit
 
-Confirm the candidate explicitly addressed the §7 tension the
-implementation handoff flagged (gate-list ordering vs. §39's later
-placement) rather than silently picking one reading. If the candidate
-built minimal daemon-skeleton infrastructure to evidence P0-IND-003's
-"reconnect after daemon restart" claim, confirm that infrastructure is
+The implementation handoff's §7 resolves the gate-list-vs-§39 tension in
+favor of resolution A (G6 is an early decision/spike gate; §39 is a
+notional, non-binding build-order checklist), citing this project's own
+git history (`phase0-g2-privilege-topology` accepted before
+`phase0-g4-transaction-engine`/`phase0-g5-diagnostic-safety`, directly
+contradicting §39's own item ordering) as decisive evidence. Confirm the
+candidate recorded this resolution explicitly in its completion report
+rather than silently assuming it, and confirm nothing in the candidate's
+actual work implies a different, unstated resolution was used instead
+(e.g. building far more daemon/provider infrastructure than resolution A
+would justify, which would suggest the candidate was actually operating
+under an unstated resolution B or C).
+
+If the candidate built minimal daemon-skeleton infrastructure to evidence
+P0-IND-003's "reconnect after daemon restart" claim, confirm: (a) it is
 genuinely minimal (not a G7 production daemon built under cover of this
-gate) and that its existence is explicitly justified in the completion
-report.
+gate); (b) it is **explicitly marked non-production/disposable** (a
+clearly-scratch-named crate/module, or a prominent doc comment stating it
+is G6 evidence infrastructure only) per the implementation handoff's §8
+requirement; and (c) the completion report does not suggest or imply this
+stub should be reused as G7's actual daemon skeleton -- G7 must design
+its own from its own governing handoff. A stub that exists but isn't
+clearly marked disposable is a finding, even if it's otherwise minimal.
 
 # 11. Scope-leak audit (G7/G8/G9)
 
