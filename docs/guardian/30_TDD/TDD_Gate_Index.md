@@ -2,7 +2,7 @@
 title: "TDD Gate Index"
 kind: "tdd-index"
 status: "active"
-last_reviewed: "2026-08-31"
+last_reviewed: "2026-09-01"
 tags:
   - tdd
   - gates
@@ -19,7 +19,7 @@ This page is a navigation layer over the governing [Phase 0/1 TDD Contract](GUAR
 | G3 | Core data models — **PASS, tagged `phase0-g3-core-data-models`** | [Capability Registry](../20_Control_Plane/Capability_Registry.md), [Provider Arbitrator](../20_Control_Plane/Provider_Arbitrator.md), [Events](../20_Control_Plane/Event_and_Incident_Model.md) | [Implementation](GUARDIAN_G3_IMPLEMENTATION_HANDOFF.md), [Independent review](GUARDIAN_G3_INDEPENDENT_REVIEW_HANDOFF.md), [Milestone](../../evidence/g3/G3_MILESTONE.md) |
 | G4 | Transaction engine — **PASS, tagged `phase0-g4-transaction-engine`** | [Transaction Engine](../20_Control_Plane/Transaction_Engine.md), [NetworkManager](../10_Platform/NetworkManager.md) | [Implementation](GUARDIAN_G4_IMPLEMENTATION_HANDOFF.md), [Independent review](GUARDIAN_G4_INDEPENDENT_REVIEW_HANDOFF.md), [Milestone](../../evidence/g4/G4_MILESTONE.md) |
 | G5 | Diagnostic safety — **PASS, tagged `phase0-g5-diagnostic-safety`** | [Diagnostic Budget](../20_Control_Plane/Diagnostic_Budget.md), [PSI](../10_Platform/PSI.md), [Flight Recorder](../20_Control_Plane/Flight_Recorder.md) | [Implementation](GUARDIAN_G5_IMPLEMENTATION_HANDOFF.md), [Independent review](GUARDIAN_G5_INDEPENDENT_REVIEW_HANDOFF.md), [Milestone](../../evidence/g5/G5_MILESTONE.md) |
-| G6 | Indicator decision — **not implemented; handoffs prepared** | [StatusNotifierItem](../10_Platform/StatusNotifierItem.md), [Client Surfaces](../20_Control_Plane/Client_Surfaces.md) | [Implementation](GUARDIAN_G6_IMPLEMENTATION_HANDOFF.md), [Independent review](GUARDIAN_G6_INDEPENDENT_REVIEW_HANDOFF.md) |
+| G6 | Indicator decision — **decided (ksni selected, conditional), not tagged (spike gate)** | [StatusNotifierItem](../10_Platform/StatusNotifierItem.md), [Client Surfaces](../20_Control_Plane/Client_Surfaces.md) | [Implementation](GUARDIAN_G6_IMPLEMENTATION_HANDOFF.md), [Independent review](GUARDIAN_G6_INDEPENDENT_REVIEW_HANDOFF.md), [ADR-006](../../adr/ADR-006-guardian-indicator-mechanism.md), [Milestone](../../evidence/g6/G6_MILESTONE.md) |
 | G7 | Production daemon | [Architecture](../20_Control_Plane/Architecture.md), [Privilege](../20_Control_Plane/Privilege_and_Authorization.md) | |
 | G8 | Initial providers | [Platform Index](../10_Platform/INDEX.md) | |
 | G9 | Clients & packaging | [Client Surfaces](../20_Control_Plane/Client_Surfaces.md) | |
