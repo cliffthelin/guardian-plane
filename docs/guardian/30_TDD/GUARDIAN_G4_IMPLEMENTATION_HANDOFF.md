@@ -76,9 +76,9 @@ Then stop.
    audit process this gate must survive the same way.
 4. `docs/evidence/g3/G3_MILESTONE.md` — **read this in full before writing
    any code.** Its "Forward constraints for G4+" section (NB-1..NB-4) is
-   binding on this handoff; §14/§15/§17/§20/§32 below are this handoff's
-   resolution of those constraints and must not be silently reopened or
-   ignored.
+   binding on this handoff; §6 (NB-1), §7 (NB-2), §8 (NB-4), and §23 (NB-3)
+   below are this handoff's resolution of those constraints and must not be
+   silently reopened or ignored.
 5. `docs/guardian/20_Control_Plane/Transaction_Engine.md`
 6. `docs/guardian/20_Control_Plane/Privilege_and_Authorization.md`
 7. `docs/adr/ADR-002-guardian-privilege-topology.md` — the G2 boundary
@@ -288,40 +288,94 @@ reaches `APPLYING`, regardless of `authorization_ownership`'s value.
 
 # 7. NB-2 resolution — revision ownership
 
-**G4 owns `revision` generation, not the transaction caller.** Concretely:
+**G4 owns `revision` generation, not the transaction caller.** This section
+was corrected from an earlier draft that described G3's `arbitrate()` as
+"the source of revision" — that is imprecise and must not guide the
+implementation. Read §7.1 before writing code.
 
-- The party that computes `ArbitrationDecision` (G3's `arbitrate()`, called
-  from wherever G4's transaction engine invokes arbitration) is the only
-  legitimate source of a `revision` value for a given `capability_id` at a
-  given moment. A transaction's `Snapshot` step captures the
-  `ArbitrationDecision` (including its `revision`) as part of `pre_state`
-  (§19) — it does not accept a caller-supplied `revision` as input.
-- `Validate` (§20) MUST re-run arbitration and compare the freshly-computed
-  `revision` against the one captured in `pre_state`. A mismatch is a
-  precondition failure → `REJECTED` (P0-TXN-002), and, if the resource
-  identity itself changed, specifically exercises P0-TXN-010.
-- `Apply` (§22) MUST re-check `revision` **immediately before mutation**
-  (§16's TOCTOU requirement) — not rely on the `Validate`-time check alone.
-  A changed `revision` between `Validate` and `Apply` blocks `Apply` and
-  transitions to `FAILED` or `ROLLING_BACK` per §4.1, never proceeds.
-- For this gate's deterministic fixtures, `revision` MAY be implemented as
-  a monotonic counter owned by a small in-memory "capability registry"
-  fixture that G4's own tests control directly (bump it between `Validate`
-  and `Apply` to prove the recheck actually blocks the write) — this is
-  the concrete, minimal mechanism this handoff requires; it does not need
-  to be the production capability-registry implementation (that belongs to
-  whichever future gate builds the real registry service). What matters is
-  that **G4's own code**, not a test's hand-constructed input, is what
-  produces and checks `revision`.
-- Restart/recovery (§26): a recovered transaction must re-derive current
-  `revision` from the (fixture) registry at recovery time — it must never
-  trust a `revision` value read back from disk as still current without
-  re-comparison.
+## 7.1 Actual dataflow — `arbitrate()` does not generate revision
+
+G3's `arbitrate()` is a **pure function**: it accepts `ArbitrationInput`
+(which already carries a `revision` field, supplied by its caller) and
+returns an `ArbitrationDecision` that carries that same `revision` value
+through unchanged. `arbitrate()` does not generate, validate, or have any
+opinion about whether the `revision` it was given is authoritative — G3's
+independent audit confirmed exactly this (revision is "only asserted," not
+model-enforced, at the G3 layer), and G3's own milestone record (NB-2)
+says this explicitly. **`arbitrate()` is not the source of revision.**
+
+The correct dataflow is:
+
+```text
+G4-owned capability/arbitration state source
+  → generates the current revision for a capability_id
+  → G4 constructs ArbitrationInput using that revision
+  → G3's arbitrate() computes the decision and carries the revision
+    through, unchanged, into ArbitrationDecision
+  → TransactionRecord's pre_state snapshots that decision (§19)
+```
+
+**A transaction caller must never supply the authoritative revision.** Any
+API surface that lets a transaction's initiator pass in a `revision` value
+that G4 then trusts is a defect — `revision` must originate only from the
+G4-owned state source described in §7.2.
+
+## 7.2 Required `ArbitrationStateSource` abstraction
+
+Define a G4-owned fixture abstraction conceptually equivalent to:
+
+```rust
+trait ArbitrationStateSource {
+    fn current_revision(&self, capability_id: &CapabilityId) -> Revision;
+    fn current_candidates(&self, capability_id: &CapabilityId) -> Vec<CandidateProvider>;
+}
+```
+
+(Exact API is implementation latitude — the point is that G4 has its own
+authoritative state source, distinct from anything a test or a caller
+constructs by hand.) G4's transaction engine calls this source to obtain
+`revision` and the current candidate set, builds `ArbitrationInput` from
+them, and only then calls G3's `arbitrate()`. For this gate's deterministic
+fixtures, the state source MAY be implemented as a small in-memory registry
+that G4's own tests control directly (bump its internal counter to prove
+the recheck below actually blocks the write) — this does not need to be
+the production capability-registry implementation (that belongs to
+whichever future gate builds the real registry service).
+
+**Test discipline requirement:** a test proves the revision mechanism by
+changing the *authoritative fixture state* (e.g. calling a method on the
+`ArbitrationStateSource` fixture that bumps its internal revision counter,
+or changes its candidate set) and then observing that G4's own code — not
+the test — re-derives a different `revision` through the normal
+`Validate`/`Apply` code path. **A test that directly mutates
+`transaction.arbitration_result.revision` and calls that proof is not
+acceptable** — that only proves two structs compare unequal, not that the
+revision mechanism is real (this is exactly the weakness G3's independent
+audit found in the G3-level test, and this handoff must not let G4 repeat
+it at a higher layer).
+
+## 7.3 Required recheck points
+
+- `Validate` MUST call the state source afresh and re-run arbitration,
+  comparing the freshly-computed `revision` against the one captured in
+  `pre_state`. A mismatch is a precondition failure → `REJECTED`
+  (P0-TXN-002), and, if the resource identity itself changed, specifically
+  exercises P0-TXN-010.
+- `Apply` MUST re-check `revision` **immediately before mutation** (§10's
+  TOCTOU requirement) via the same state source — not rely on the
+  `Validate`-time check alone. A changed `revision` between `Validate` and
+  `Apply` blocks `Apply` and transitions per §4.1, never proceeds.
+- Restart/recovery (§20) MUST re-derive current `revision` from the state
+  source at recovery time — it must never trust a `revision` value read
+  back from disk as still current without re-comparison. **The persisted
+  `revision` inside a recovered `TransactionRecord` is historical
+  precondition evidence only — never current truth.**
 
 Required tests: (a) `revision` unchanged between `Validate` and `Apply` →
-transaction proceeds; (b) `revision` bumped between `Validate` and `Apply`
-(simulating a concurrent ownership change) → `Apply` is blocked, not
-silently proceeded with.
+transaction proceeds; (b) the `ArbitrationStateSource` fixture's
+authoritative state is changed between `Validate` and `Apply` (simulating a
+concurrent ownership change), and `Apply` is blocked as a result of G4's
+own recheck — not by a test directly editing a `revision` field.
 
 ---
 
@@ -468,7 +522,7 @@ distinction must be a real, tested fixture behavior (configurable "apply
 fails cleanly" vs. "apply fails after partially mutating"), not asserted
 in prose only.
 
-Use only deterministic fixture adapters (§34 below) — no real provider
+Use only deterministic fixture adapters (§25 below) — no real provider
 integration.
 
 ---
@@ -503,52 +557,255 @@ below) must be explicit and reached, not left ambiguous.
 # 17. Rollback contract (§25/§26 of the requester's brief, using G3's `RollbackKind`)
 
 Reuse G3's `RollbackKind` (`Native | Emulated | BestEffort | None`)
-unchanged. Define behavior for each:
+unchanged. Define behavior for each, and — **this is a required repair to
+an earlier draft of this handoff, which described a `BestEffort`-ambiguous
+outcome that neither the canonical state machine (§4) nor P0-TXN-006/007
+can actually represent** — resolve the ambiguity via a typed evidence field,
+never by inventing a new transaction state.
+
+## 17.1 The contradiction this section resolves
+
+An earlier draft said `BestEffort` rollback's unconfirmed outcome "must not
+be forced into either `ROLLED_BACK` or `ROLLBACK_FAILED`." But §4's
+canonical state machine permits only `ROLLING_BACK → ROLLED_BACK |
+ROLLBACK_FAILED`, and §4 explicitly forbids adding states. These two
+requirements cannot both hold literally. **Do not add a
+`ROLLBACK_AMBIGUOUS` (or similarly-named) transaction state to resolve
+this** — §4's state list is fixed by the governing contract and is not
+reopened here.
+
+## 17.2 Required resolution: fail-closed state, typed evidence
+
+Unless the governing TDD contract is found to specify a different mapping
+(§14/§15 do not), use **fail-closed** semantics at the transaction-state
+level, with a separate typed field carrying the finer-grained evidence:
+
+```rust
+enum RollbackOutcome {
+    ConfirmedRestored,
+    ConfirmedFailed,
+    AttemptedUnconfirmed,
+    NotSupported,
+}
+```
+
+(Exact naming is implementation latitude; the four distinctions above are
+required.) Mapping to the canonical transaction state:
+
+```text
+RollbackOutcome::ConfirmedRestored    → transaction state ROLLED_BACK
+RollbackOutcome::ConfirmedFailed      → transaction state ROLLBACK_FAILED
+RollbackOutcome::AttemptedUnconfirmed → transaction state ROLLBACK_FAILED
+RollbackOutcome::NotSupported         → transaction state ROLLBACK_FAILED
+```
+
+**`ROLLBACK_FAILED` at the transaction-state level does not narrowly mean
+"the provider definitively reported restoration failure."** For
+state-machine purposes it means *"Guardian cannot positively establish
+successful rollback."* This is deliberate and required: a transaction
+consumer that only reads the coarse state must never be able to mistake an
+unconfirmed `BestEffort` attempt for confirmed success — fail-closed at the
+state level is what prevents that. The finer-grained truth (confirmed
+provider failure vs. genuinely unknown outcome) is preserved losslessly in
+`rollback_result: RollbackOutcome` on `TransactionRecord`, which any
+consumer that needs the distinction (e.g. future incident-severity
+classification) reads directly instead of inferring it from the coarse
+state.
+
+Per-`RollbackKind` behavior:
 
 - **Native**: the fixture provider genuinely restores prior state from the
-  snapshot; rollback is expected and testable (P0-TXN-006 uses this).
-- **Emulated**: Guardian synthesizes restoration from the captured
-  snapshot itself (e.g. re-`Apply`ing the inverse typed action) — model
-  this as a real, distinct code path in the fixture, not silently identical
-  to Native.
-- **BestEffort**: rollback is attempted but the outcome may remain
-  ambiguous — the resulting state must be representable as "rollback
-  attempted, success unconfirmed," not forced into either `ROLLED_BACK` or
-  `ROLLBACK_FAILED` when the fixture genuinely can't tell.
+  snapshot and confirms it → `RollbackOutcome::ConfirmedRestored` →
+  `ROLLED_BACK` (P0-TXN-006).
+- **Emulated**: Guardian synthesizes restoration from the captured snapshot
+  itself (e.g. re-`Apply`ing the inverse typed action) and confirms it →
+  `ConfirmedRestored` → `ROLLED_BACK`. Model this as a real, distinct code
+  path in the fixture, not silently identical to Native.
+- **BestEffort**: rollback is attempted; if the fixture can positively
+  confirm restoration → `ConfirmedRestored` → `ROLLED_BACK`; if the fixture
+  cannot confirm it → `AttemptedUnconfirmed` → `ROLLBACK_FAILED` (fail
+  closed at the state level, per §17.2 above) with `rollback_result =
+  AttemptedUnconfirmed` preserving that this was an unconfirmed attempt,
+  not a proven failure.
 - **None**: the transaction must expose, structurally, that rollback
-  cannot be guaranteed — do not claim full safety for `RollbackKind::None`.
-  A `VERY_HIGH`-risk action (TDD contract §10) with `RollbackKind::None`
-  is exactly the case §10's "never automated by default; explicit user
+  cannot be guaranteed — `RollbackOutcome::NotSupported`, and a
+  `RollbackKind::None` transaction must never report `ROLLED_BACK`. A
+  `VERY_HIGH`-risk action (TDD contract §10) with `RollbackKind::None` is
+  exactly the case §10's "never automated by default; explicit user
   acknowledgement required" language exists for — this handoff does not
   build that policy layer (that's a client/UI concern, later gates), but
-  the transaction *model* must make the fact ("no rollback guarantee")
-  inspectable so a later gate can enforce policy on it.
+  the transaction *model* must make the fact inspectable so a later gate
+  can enforce policy on it.
 
-**Rollback failure is a first-class state** (P0-TXN-007, `ROLLBACK_FAILED`).
-Do not collapse "Apply failed, rollback succeeded" with "Apply failed,
-rollback failed," or "Apply succeeded, Confirm failed, rollback failed" —
-the last of these represents an unresolved incident requiring recovery, and
-must be distinguishably represented (e.g. via `rollback_result`'s own typed
-outcome plus a linked `incident_ids` entry) so a future Event/Incident
-integration (§18 below) can surface it, without G4 itself implementing that
-surfacing.
+## 17.3 Required rollback tests
+
+At minimum, one test per row:
+
+```text
+Native rollback confirmed        → ROLLED_BACK, rollback_result = ConfirmedRestored
+Emulated rollback confirmed      → ROLLED_BACK, rollback_result = ConfirmedRestored
+BestEffort rollback confirmed    → ROLLED_BACK, rollback_result = ConfirmedRestored
+BestEffort rollback unconfirmed  → ROLLBACK_FAILED, rollback_result = AttemptedUnconfirmed
+Rollback provider explicit failure → ROLLBACK_FAILED, rollback_result = ConfirmedFailed
+RollbackKind::None                → never ROLLED_BACK; rollback_result = NotSupported
+```
+
+The `BestEffort rollback unconfirmed` and `Rollback provider explicit
+failure` rows both land on transaction state `ROLLBACK_FAILED` but must be
+distinguishable via `rollback_result` — a test asserting only the
+transaction state for either row is insufficient; both `rollback_result`
+and the transaction state must be asserted.
+
+**Rollback failure remains a first-class state** (P0-TXN-007,
+`ROLLBACK_FAILED`). Do not collapse "Apply failed, rollback succeeded" with
+"Apply failed, rollback failed," or "Apply succeeded, Confirm failed,
+rollback failed" — the last of these represents an unresolved incident
+requiring recovery, and must be distinguishably represented (via
+`rollback_result` plus a linked `incident_ids` entry) so a future
+Event/Incident integration (§21 below) can surface it, without G4 itself
+implementing that surfacing.
 
 ---
 
 # 18. Lost response / duplicate apply (P0-TXN-009)
 
-Address explicitly: helper/provider applies a mutation, the response is
-lost, the caller retries. Required mechanism for this gate:
-`idempotency_key` on `TransactionRecord` — the engine must refuse to
-`Apply` a second time for a transaction whose `idempotency_key` already has
-a recorded `APPLYING`/post-`APPLYING` outcome, returning the existing
-result instead of re-executing. Do not invent a universal cross-provider
-idempotency guarantee beyond this — real providers may differ (that's G8's
-problem to solve per-provider); this gate's obligation is that **Guardian's
-own transaction engine** never re-applies the same `idempotency_key` twice
-against its own fixture adapters. Required test: retry with the same
-`idempotency_key` after a simulated lost response does not cause a second
-`Apply` call to the fixture.
+## 18.1 The unsafe claim this section repairs
+
+An earlier draft of this handoff said a duplicate `idempotency_key` with a
+recorded `APPLYING` (or later) state should prevent a second `Apply` and
+*return the existing result*. That is unsafe as written, because a durable
+`APPLYING` state can mean at least three different realities, and the
+handoff must not conflate them:
+
+```text
+A. APPLYING persisted, crash before the provider was invoked at all
+   → mutation did NOT occur
+
+B. provider invoked, mutation occurred, process crashed before the
+   result was persisted
+   → mutation DID occur, outcome unrecorded
+
+C. provider invoked, mutation outcome uncertain (response lost)
+   → unknown whether mutation occurred
+```
+
+**`state == APPLYING` is not proof that `Apply` occurred, and is not
+sufficient grounds to return a successful prior result.** Any handoff text
+implying otherwise is corrected by this section.
+
+## 18.2 Required repair: separate Apply-intent from Apply-outcome
+
+The transaction persistence model MUST distinguish, as two separately
+persisted facts:
+
+- **Apply-intent durably recorded** — "Guardian was about to attempt
+  `Apply`" (persisted *before* the provider is invoked, §19.1 below);
+- **Apply-outcome durably recorded** — "Guardian knows what happened."
+
+Conceptual shape (exact representation is implementation latitude; it may
+live inside `provider_request`/`provider_response`, a dedicated field on
+`TransactionRecord`, or a small dedicated type — the distinctions below are
+required, the exact struct/enum names are not):
+
+```rust
+ApplyRecord {
+    idempotency_key,
+    attempt_started_at,
+    outcome: ApplyOutcome,
+}
+
+enum ApplyOutcome {
+    NotRecorded,
+    ConfirmedSuccess,
+    ConfirmedFailureNoMutation,
+    PartialOrUncertainMutation,
+    ResponseLostOrUnknown,
+}
+```
+
+No new transaction state is added for this (§4's state list is unchanged) —
+`ApplyOutcome` is evidence carried inside the existing `APPLYING`/
+`OBSERVING`/terminal states' associated data, not a new state.
+
+## 18.3 Required idempotency-key behavior on retry
+
+For a duplicate `idempotency_key`, behavior depends on which `ApplyOutcome`
+is durably known:
+
+- **Known completed Apply** (`ApplyOutcome::ConfirmedSuccess` or another
+  terminal known outcome): do not invoke provider `Apply` again; return/
+  recover the recorded transaction outcome directly.
+- **Apply may have happened, outcome unknown**
+  (`ApplyOutcome::PartialOrUncertainMutation` or `ResponseLostOrUnknown`,
+  or an `ApplyRecord` whose `attempt_started_at` is recorded with
+  `outcome: NotRecorded` and no further evidence): do **not** blindly
+  re-`Apply`, and do **not** pretend success. Classify per §18.4/§20 as
+  `must-observe` or `state-ambiguous` and use the recovery contract — never
+  fabricate a `COMMITTED` result merely because an `APPLYING` marker
+  exists.
+- **Apply definitely did not happen**: only when durable evidence
+  *positively proves* the provider was never invoked (i.e., no
+  Apply-intent record exists yet, or the Apply-intent record itself proves,
+  by construction, that the call could not have been made — e.g. a
+  crash-before-invocation scenario the persistence ordering in §19.1 makes
+  provable) may the engine safely resume before `Apply`. Do not infer "did
+  not happen" merely from the *absence* of a recorded response — absence
+  of evidence is exactly case C above (`ResponseLostOrUnknown`), not proof
+  of non-occurrence.
+
+## 18.4 Lost-response recovery must attempt observation before any retry
+
+When Apply-outcome is unknown (`PartialOrUncertainMutation` /
+`ResponseLostOrUnknown`), the preferred recovery behavior, where the
+provider supports meaningful observation, is:
+
+1. **Observe** current resource state before any retry decision.
+2. If observation proves the intended postcondition was met: continue
+   recovery toward `Confirm`/`Commit` **without** a second `Apply` call.
+3. If observation proves the mutation did not occur, and re-`Apply` is
+   otherwise safely allowed by the transaction's preconditions (§9):
+   resume under the transaction's governed rules (i.e., proceed to a real
+   `Apply`, since this is now case "definitely did not happen").
+4. If observation cannot determine state: classify `state-ambiguous`
+   (§20). Do not silently retry `Apply` merely because observation was
+   inconclusive.
+
+## 18.5 What P0-TXN-009 actually requires and guarantees
+
+The normative requirement remains exactly: *same `idempotency_key` → the
+same Guardian transaction/write must not execute provider `Apply` twice.*
+Required test, corrected from the earlier draft: simulate provider applies
+mutation → response is lost → transaction retries with the same
+`idempotency_key`. Required assertions:
+
+- fixture `apply()` call count == 1 (the core P0-TXN-009 guarantee);
+- **the retry does not report `COMMITTED` merely because an `APPLYING`
+  marker exists** — it must either genuinely `Observe`/recover existing
+  state (§18.4) or classify `state-ambiguous`, according to what the
+  fixture can actually establish.
+
+**Scope limitation, preserved explicitly:** G4 guarantees only that
+*Guardian's own transaction engine* does not knowingly call `Apply` twice
+for the same `idempotency_key` against its own fixture adapters. G4 does
+**not** claim that all real providers guarantee exactly-once mutation —
+provider-specific idempotency semantics (whether a real provider's own API
+is safe to retry, offers its own operation-identity tokens, etc.) are
+explicitly deferred to G8, which must evaluate each real provider's actual
+semantics before assuming this guarantee extends to it.
+
+## 18.6 Required crash-before-Apply adversarial test
+
+Separate from the lost-response test above, add: persist an Apply-intent
+marker → simulate a crash **before** the fixture's `apply()` is ever
+invoked → restart/recovery. Required: the engine must not report the
+mutation as successful, and must not classify the transaction as
+"already committed." The correct recovery classification follows the final
+persistence design (§19.1): if the persistence ordering can *prove* `Apply`
+was never invoked (e.g. the Apply-intent record itself, or its absence,
+demonstrates this by construction), `safe-to-resume` is appropriate; if it
+cannot prove that, `state-ambiguous` is the safer classification. The
+handoff's persistence-ordering section (§19.1) must specify exactly which
+evidence makes this distinction provable.
 
 ---
 
@@ -581,6 +838,56 @@ Define, without implementing production packaging:
   out of scope), but the *contract* (schema, atomicity, versioning) must be
   real and tested, not simulated only in memory with no serialization at
   all.
+
+## 19.1 Required durable ordering around Apply (feeds §18's recovery distinctions)
+
+The handoff requires an explicit durable ordering, at minimum equivalent
+to:
+
+```text
+1. persist transaction + pre_state
+2. persist that Apply is about to be attempted (the Apply-intent record, §18.2)
+3. fsync/atomic durable completion of step 2
+4. invoke provider Apply
+5. persist provider result / Apply-outcome (§18.2)
+6. Observe
+```
+
+The exact storage mechanism may differ, but **a crash at every boundary
+must have a defined recovery interpretation**:
+
+```text
+crash before step 2 completes    → no Apply-intent record exists (or it did not durably
+                                    complete) → Apply provably never invoked → safe-to-resume
+crash between step 2 and step 4  → Apply-intent record exists, durably fsynced, but the
+                                    provider was never called → Apply provably never invoked
+                                    (the durable ordering guarantees step 4 cannot have run
+                                    without step 3 completing first) → safe-to-resume
+crash during step 4              → the provider call was in flight when the crash occurred;
+                                    whether the external mutation happened is INHERENTLY
+                                    UNCERTAIN from Guardian's own persistence alone — classify
+                                    state-ambiguous / must-observe (§18.4), never safe-to-resume
+                                    and never already-committed
+crash between step 4 and step 5  → the provider call completed (or the process believes it
+                                    might have) but the outcome was never durably recorded →
+                                    ResponseLostOrUnknown → must-observe (§18.4)
+crash after step 5               → Apply-outcome is durably known → recovery proceeds directly
+                                    from the recorded outcome (Observe if outcome is
+                                    ConfirmedSuccess with no observation yet recorded, etc.)
+```
+
+**Do not claim persistence can prove whether an external mutation occurred
+when the crash happened during the external call itself (step 4).** That
+interval is inherently uncertain unless the specific provider offers its
+own idempotency/operation-identity mechanism — which is explicitly deferred
+to G8 (§18.5). G4's obligation is only that its own persistence ordering
+makes every *other* boundary provable, and that the one inherently
+uncertain boundary is classified `state-ambiguous`/`must-observe`, never
+guessed as either extreme.
+
+Required tests: at minimum one test per crash boundary listed above (5
+tests), each constructing a persisted-state fixture representing that exact
+crash point and asserting the correct recovery classification.
 
 ---
 
@@ -744,13 +1051,32 @@ completion report, matching G3's evidentiary standard.
 16. rollback failure hidden — does `ROLLBACK_FAILED` ever get collapsed
     into `FAILED` or `ROLLED_BACK` in any code path?
 17. best-effort rollback reported as success — does `RollbackKind::BestEffort`
-    ever force a `ROLLED_BACK` result the fixture couldn't actually confirm?
+    ever force a `ROLLED_BACK` result the fixture couldn't actually confirm
+    (must be `ROLLBACK_FAILED` + `rollback_result = AttemptedUnconfirmed`,
+    §17.2)?
 18. `Debug`-format persistence — does any persisted record rely on `Debug`
     output as its wire format?
 19. real provider leakage — does any fixture or test accidentally call a
     real system D-Bus service?
 20. G5/G8 scope leakage — does any code implement diagnostic-budget logic,
     a real provider adapter, or client-facing surface?
+21. `APPLYING` marker treated as proof of successful mutation — does any
+    recovery path report `COMMITTED`, or return a "success" result, based
+    solely on the presence of an `APPLYING`/Apply-intent record with no
+    durable Apply-outcome (§18.2/§18.3)?
+22. crash before provider invocation misclassified — does the
+    crash-before-`Apply` test (§18.6) ever get classified as
+    "already committed" or report the mutation as successful?
+23. response loss causes a second fixture `Apply` call — does the
+    lost-response retry test (§18.5) show `apply()` called more than once?
+24. response loss treated as success without `Observe` — does any recovery
+    path skip §18.4's required `Observe`-before-retry step and simply
+    assume success?
+25. revision proof by test mutation — does any G4 test prove the revision
+    recheck by directly setting `transaction.arbitration_result.revision`
+    rather than by changing the `ArbitrationStateSource` fixture's
+    authoritative state and letting G4's own code re-derive a different
+    value (§7.2)?
 
 ---
 
@@ -776,16 +1102,22 @@ Include, at minimum: which normative tests are green with exact names/IDs
 (all 12 `P0-TXN-*`); the state-machine transition table actually
 implemented, compared against §4.1; `TransactionId` format chosen and why
 (§8); the `EventId`/`IncidentId` decision made (§8, option a or b, and
-why); the exact revision-ownership mechanism built (§7); where
-`PrivilegeRequirement::Unknown` is checked and by which function (§6); the
-persistence schema version and atomic-write mechanism (§19); the six
-recovery-classification tests and their results (§20); the §27 adversarial
-self-check results item-by-item, including which were executed as real
-scratch mutations vs. reasoned by inspection (mirror G3's audit-survivable
-standard, don't just claim it); full `cargo fmt --check` / `cargo clippy
---workspace --all-targets --all-features -- -D warnings` / `cargo test
---workspace` output; and an explicit statement of what was deferred to G5
-or G8 and why.
+why); the exact revision-ownership mechanism built, including confirmation
+that the `ArbitrationStateSource` fixture (not caller-supplied input, not
+direct test mutation of a `revision` field) is what tests actually exercise
+(§7); the `RollbackOutcome` mapping actually implemented and the six
+required rollback tests' results (§17.3); the `ApplyOutcome`/Apply-intent
+model actually implemented, the five persistence-ordering crash-boundary
+tests' results (§19.1), and the crash-before-`Apply` test's result (§18.6);
+where `PrivilegeRequirement::Unknown` is checked and by which function
+(§6); the persistence schema version and atomic-write mechanism (§19); the
+six recovery-classification tests and their results (§20); the §27
+adversarial self-check results item-by-item (all 25 items), including
+which were executed as real scratch mutations vs. reasoned by inspection
+(mirror G3's audit-survivable standard, don't just claim it); full `cargo
+fmt --check` / `cargo clippy --workspace --all-targets --all-features --
+-D warnings` / `cargo test --workspace` output; and an explicit statement
+of what was deferred to G5 or G8 and why.
 
 Then stop. Do not begin G5. Do not tag G4 — independent review happens
 first, exactly as it did for G0 through G3.

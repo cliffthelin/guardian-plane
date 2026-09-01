@@ -61,11 +61,29 @@ FAIL — STALE PRECONDITION NOT DETECTABLE
 FAIL — UNKNOWN PRIVILEGE EXECUTION ALLOWED
 FAIL — AUTHORIZATION BOUNDARY REGRESSION
 FAIL — ROLLBACK MODEL UNSAFE
+FAIL — AMBIGUOUS ROLLBACK REPORTED SAFE
 FAIL — CRASH RECOVERY MODEL INSUFFICIENT
 FAIL — PERSISTENCE CONTRACT UNSAFE
 FAIL — DUPLICATE APPLY RISK UNCONTROLLED
+FAIL — APPLY RECOVERY / IDEMPOTENCY UNSAFE
+FAIL — REVISION AUTHORITY NOT ESTABLISHED
 FAIL — G5/G8 SCOPE LEAK
 ```
+
+`FAIL — AMBIGUOUS ROLLBACK REPORTED SAFE` is the specific case of
+`FAIL — ROLLBACK MODEL UNSAFE` where a `BestEffort` (or any) rollback
+attempt whose outcome the fixture could not actually confirm gets reported
+as `ROLLED_BACK` — use this more specific verdict when that exact failure
+mode is what's found. `FAIL — APPLY RECOVERY / IDEMPOTENCY UNSAFE` is the
+specific case of `FAIL — DUPLICATE APPLY RISK UNCONTROLLED` where an
+`APPLYING`/Apply-intent marker is treated as proof of successful mutation,
+or a lost-response recovery skips `Observe` and assumes success. `FAIL —
+REVISION AUTHORITY NOT ESTABLISHED` covers both a caller-supplied revision
+being trusted and a test proving the revision mechanism only by directly
+mutating a `revision` field rather than by exercising the real
+`ArbitrationStateSource` recheck path. Use the more specific verdict when
+it applies; fall back to the general one if the defect doesn't map cleanly
+to one of the specific cases.
 
 A `PASS` means the transaction engine is sound enough to become Guardian's
 G4 milestone.
@@ -105,20 +123,40 @@ If mutation before authorization is possible anywhere, verdict is
 
 # 6. Stale precondition detectability audit (NB-2 resolution)
 
-- Confirm `revision` is produced by G4's own code (arbitration re-run,
-  or an explicit fixture registry G4 controls), never accepted as a bare
-  caller-supplied input with no derivation.
-- Confirm `Validate` re-runs arbitration and compares `revision` against
-  `pre_state`'s captured value.
+- Confirm an `ArbitrationStateSource`-shaped abstraction (or equivalent)
+  exists and is the sole source of `revision` — never accepted as a bare
+  caller-supplied input with no derivation. Locate the actual construction
+  site of every `ArbitrationInput` in the G4 code path and confirm its
+  `revision` field is populated from this source, not from a transaction
+  caller's request.
+- Confirm `Validate` re-runs arbitration (via the state source, not by
+  reusing a cached decision) and compares the freshly-computed `revision`
+  against `pre_state`'s captured value.
 - Confirm `Apply` re-checks `revision` **immediately before mutation**, not
-  only at `Validate` time — locate the specific test that bumps `revision`
-  between `Validate` and `Apply` and confirms `Apply` is blocked.
-- Confirm restart/recovery re-derives current `revision` rather than
-  trusting a disk-persisted value as still current.
+  only at `Validate` time — locate the specific test that changes the
+  state source's authoritative state between `Validate` and `Apply` and
+  confirms `Apply` is blocked.
+- Confirm restart/recovery re-derives current `revision` from the state
+  source rather than trusting a disk-persisted value as still current.
+- **High-priority specific check — test-discipline audit:** for every test
+  that claims to prove the revision recheck, inspect whether it changes the
+  *authoritative fixture state* (e.g. calls a mutator on the
+  `ArbitrationStateSource` fixture) and lets G4's own code re-derive a
+  different `revision`, versus directly setting
+  `transaction.arbitration_result.revision` (or an equivalent field) by
+  hand and asserting inequality. The latter is not proof of anything — it
+  only proves two structs compare unequal, exactly the weakness G3's own
+  independent audit found at the arbitration layer (NB-2). If G4's tests
+  repeat this pattern at the transaction layer, that is
+  `FAIL — REVISION AUTHORITY NOT ESTABLISHED`, even if the test technically
+  passes.
 
 If `revision` is still a bare caller-trusted number with no G4-owned
-derivation or TOCTOU recheck, verdict is
-`FAIL — STALE PRECONDITION NOT DETECTABLE`.
+derivation or TOCTOU recheck, or if the tests only prove the mechanism by
+direct field mutation rather than exercising the real recheck path, verdict
+is `FAIL — STALE PRECONDITION NOT DETECTABLE` or the more specific
+`FAIL — REVISION AUTHORITY NOT ESTABLISHED`, per whichever failure mode is
+found.
 
 ---
 
@@ -174,17 +212,41 @@ value be mistaken for real caller-authorization proof, verdict is
 - Confirm `RollbackKind::None` never gets silently treated as though
   rollback succeeded, and confirm the model exposes "no rollback guarantee"
   as an inspectable fact.
-- Confirm `RollbackKind::BestEffort`'s ambiguous outcome is representable
-  and not forced into `ROLLED_BACK` when the fixture can't actually confirm
-  success.
+- Confirm `RollbackOutcome` (or equivalent) exists as a typed field
+  distinguishing at least `ConfirmedRestored`/`ConfirmedFailed`/
+  `AttemptedUnconfirmed`/`NotSupported`, and confirm no *new transaction
+  state* was added to represent rollback ambiguity — the canonical state
+  list (§14 of the implementation handoff) must be unchanged; ambiguity
+  must be resolved via this typed field, not a state like
+  `ROLLBACK_AMBIGUOUS`.
+- **High-priority specific check:** confirm `RollbackKind::BestEffort`'s
+  *unconfirmed* outcome maps to transaction state `ROLLBACK_FAILED` with
+  `rollback_result = AttemptedUnconfirmed` — **not** `ROLLED_BACK`. Attempt
+  a scratch mutation (in `/tmp`) that reports a `BestEffort` unconfirmed
+  attempt as `ROLLED_BACK` and confirm a test catches it. If the
+  implementation instead leaves this case unrepresentable, or forces it
+  into `ROLLED_BACK`, that is exactly the ambiguity the implementation
+  handoff was repaired to resolve — verdict is
+  `FAIL — AMBIGUOUS ROLLBACK REPORTED SAFE`.
+- Confirm `AttemptedUnconfirmed` (fixture couldn't confirm) and
+  `ConfirmedFailed` (fixture positively reported failure) are both
+  distinguishable at the `rollback_result` level even though both map to
+  the same `ROLLBACK_FAILED` transaction state — locate a test asserting
+  `rollback_result` specifically for each, not only the coarse state.
 - Confirm `ROLLBACK_FAILED` (P0-TXN-007) is a real, distinct, reachable
   state — locate the test, and confirm by scratch mutation that collapsing
   it into `FAILED` or `ROLLED_BACK` would be caught.
 - Confirm the "Apply succeeded, Confirm failed, rollback failed" case is
   distinguishably represented (not silently indistinguishable from a
   cleaner failure).
+- Confirm all six required rollback tests from implementation handoff
+  §17.3 exist and pass: Native confirmed, Emulated confirmed, BestEffort
+  confirmed, BestEffort unconfirmed, explicit provider rollback failure,
+  and `RollbackKind::None` never reporting `ROLLED_BACK`.
 
-If any of these is false, verdict is `FAIL — ROLLBACK MODEL UNSAFE`.
+If any of these is false (other than the specific `BestEffort`-ambiguity
+case above, which gets its own verdict), verdict is
+`FAIL — ROLLBACK MODEL UNSAFE`.
 
 ---
 
@@ -242,9 +304,39 @@ misinterpreted as valid, verdict is `FAIL — PERSISTENCE CONTRACT UNSAFE`.
 - Confirm the mechanism is scoped honestly (Guardian's own engine never
   double-applies against its own fixtures) without an overclaimed universal
   cross-provider guarantee the handoff didn't require.
+- **High-priority specific check:** confirm `state == APPLYING` (or an
+  Apply-intent marker existing) is never, by itself, treated as proof that
+  the mutation occurred or completed successfully. Attempt a scratch
+  mutation making the recovery/retry path return a "success" result solely
+  because an `APPLYING`/Apply-intent record exists, with no durable
+  Apply-outcome — confirm a test catches it. If this can happen, verdict is
+  the more specific `FAIL — APPLY RECOVERY / IDEMPOTENCY UNSAFE` rather
+  than the general duplicate-apply verdict.
+- Confirm the required crash-before-`Apply` test (implementation handoff
+  §18.6) exists: an Apply-intent marker is persisted, a crash is simulated
+  *before* the fixture's `apply()` is ever invoked, and recovery does
+  **not** report the mutation as successful or classify the transaction as
+  already committed.
+- Confirm the lost-response recovery path genuinely calls `Observe` before
+  deciding whether to retry or classify `state-ambiguous` (implementation
+  handoff §18.4) — attempt a scratch mutation that skips `Observe` and
+  assumes success on an unconfirmed Apply-outcome; confirm a test catches
+  it. Skipping `Observe` and assuming success is
+  `FAIL — APPLY RECOVERY / IDEMPOTENCY UNSAFE`.
+- Confirm the five persistence-ordering crash-boundary tests
+  (implementation handoff §19.1) exist and that the "crash during the
+  provider call itself" boundary is classified `state-ambiguous`/
+  `must-observe` — never `safe-to-resume` and never `already-committed`.
+  A test or claim that persistence can *prove* what happened during that
+  specific boundary is itself a finding — the implementation handoff is
+  explicit that this interval is inherently uncertain without
+  provider-specific idempotency (deferred to G8).
 
-If the same `idempotency_key` can cause two real `apply()` calls, verdict
-is `FAIL — DUPLICATE APPLY RISK UNCONTROLLED`.
+If the same `idempotency_key` can cause two real `apply()` calls, or an
+`APPLYING` marker alone is ever treated as proof of successful mutation,
+verdict is `FAIL — DUPLICATE APPLY RISK UNCONTROLLED` or the more specific
+`FAIL — APPLY RECOVERY / IDEMPOTENCY UNSAFE`, per whichever failure mode
+is found.
 
 ---
 
@@ -328,8 +420,12 @@ from G3, unmodified) and confirm:
 # 19. Adversarial questions (mirror the implementation handoff's §27, verify each independently)
 
 Report each as confirmed safe / confirmed unsafe / not applicable, with the
-specific file/test supporting the conclusion, for all 20 items listed in
-the implementation handoff's §27.
+specific file/test supporting the conclusion, for all 25 items listed in
+the implementation handoff's §27 (items 21-25 were added in this repair
+pass, covering Apply-intent-as-proof, crash-before-invocation
+misclassification, duplicate real Apply calls, skipped-Observe-on-retry,
+and revision-proof-by-direct-mutation — do not skip these on the assumption
+they duplicate earlier items; verify each independently).
 
 ---
 
