@@ -17,7 +17,7 @@
 //! DISPOSABLE: built and run only inside a disposable VM, never on a
 //! primary workstation. Not wired into `guardian-daemon`, not part of
 //! any production build, not referenced by the Cargo workspace at
-//! `/home/Cliff/SysProjects/Ubuntu_Guardian_Plane/Cargo.toml`.
+//! `/home/Cliff/SysProjects/Guardian/Cargo.toml`.
 //!
 //! Icon names (updated during G6 evidence closure): the original
 //! `"emblem-default"` icon name does not exist in this project's tested

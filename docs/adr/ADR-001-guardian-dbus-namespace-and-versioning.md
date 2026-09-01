@@ -20,7 +20,7 @@ Repository slug:       guardian-plane
 Description:           A local-first system control and recovery plane for Ubuntu Linux.
 ```
 
-Ubuntu is named as the target platform, not as part of Guardian Plane's owned brand. The public identity deliberately does not incorporate "Ubuntu", which would raise Canonical trademark considerations that this project has not taken on. The local development directory is still named `Ubuntu_Guardian_Plane`; that path is a machine-local artifact and is not the public identity.
+Ubuntu is named as the target platform, not as part of Guardian Plane's owned brand. The public identity deliberately does not incorporate "Ubuntu", which would raise Canonical trademark considerations that this project has not taken on. The local development directory is named `Guardian`; that path is a machine-local artifact and is not the public identity.
 
 ## Decision
 
