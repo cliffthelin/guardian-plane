@@ -183,6 +183,104 @@ corrected to match or left as-is until a later gate — see
 Any correction to `EventId`/`IncidentId` validation is a deliberate,
 separately-reviewed code change, not an automatic consequence of this note.
 
+## NB-3 / NB-4 disposition (documentation-only, added after G7 planning review)
+
+Neither of these was formally closed when G4 touched the adjacent code
+(G4 added `RollbackKind::FromStr` and gave `TransactionId` its own
+bespoke validator — both real, correct partial resolutions — but left
+the remainder of NB-3 and half of NB-4 undocumented rather than
+explicitly dispositioned). This section records that disposition now, as
+plain documentation — no code changes, no gate reopened, no tag moved.
+
+### NB-3 disposition — boundary-driven serialization (accepted, not deferred as an oversight)
+
+The six types are treated as **boundary-driven**, not uniformly required:
+a type gets `FromStr`/round-trip serialization only once something real
+carries it across a process, persistence, or IPC boundary — never added
+merely for symmetry with its siblings, per the original NB-3 guidance.
+
+```text
+RollbackKind:      CLOSED at G4 — crosses the transaction-persistence
+                   boundary (TransactionRecord's rollback_result field),
+                   FromStr added, closure recorded in
+                   docs/evidence/g4/G4_MILESTONE.md ("RollbackKind::FromStr
+                   addition, NB-3 closure").
+Risk:              DEFERRED. Carried on TransactionRecord (`risk_class`)
+                   but not yet persisted/deserialized across a boundary
+                   requiring FromStr — G4's persistence module stores it
+                   via typed fields, not a wire string read back into a
+                   Risk value. Future owner/trigger: whichever gate first
+                   needs to reconstruct a Risk value from a serialized/
+                   external representation (e.g. a CLI/GUI argument, a
+                   D-Bus property read back as a string, or a persisted
+                   record loaded by a process that did not originate it)
+                   — most likely G7 (daemon/helper persistence readback)
+                   or G9 (CLI/GUI input). That gate must add FromStr then,
+                   not assume it already exists.
+BootAvailability:  DEFERRED. No G0-G6 code path serializes or parses it
+                   externally. Future owner/trigger: G8, when a real
+                   boot-availability provider (contract §21) needs to
+                   report or receive this value across a real interface.
+Ownership:         DEFERRED. Internal to arbitration decisions
+                   (guardian_core::arbitration), never yet persisted or
+                   sent over D-Bus. Future owner/trigger: whichever gate
+                   first exposes arbitration/ownership state on a public
+                   or persisted interface — likely G8+ once multiple real
+                   capability areas make ownership state externally
+                   observable.
+IncidentStatus:    DEFERRED. `guardian_core::incident` has no persistence
+                   or D-Bus exposure yet. Future owner/trigger: whichever
+                   gate first persists or publishes Incident records
+                   (contract §18) — not yet scheduled to a specific gate
+                   number; the owner is "whichever gate builds incident
+                   persistence/reporting first."
+Confidence:        DEFERRED. Same reasoning as IncidentStatus — carried
+                   on event/incident correlation, no boundary crossing
+                   yet. Same future owner/trigger.
+```
+
+**Standing rule going forward:** a future gate that introduces a real
+boundary crossing for any of the five deferred types must add
+`FromStr`/round-trip serialization for that type at that time, and must
+not assume — merely because this disposition exists — that the type
+already has it. This disposition is a scope statement, not a permanent
+exemption.
+
+### NB-4 disposition — intentional current decision (not an oversight)
+
+```text
+TransactionId:        CLOSED at G4 — deliberately given its own
+                       UUID-shaped generated-record-identity validator,
+                       distinct from CapabilityId/ProviderId's
+                       dotted-domain semantic-identity macro. Documented
+                       in the type's own doc comment
+                       (crates/guardian-core/src/transaction/id.rs,
+                       "G3 NB-4; G4 handoff §8").
+EventId/IncidentId:    INTENTIONALLY LEFT AS-IS. Both continue to use the
+                       shared dotted-lowercase-domain `stable_id!` macro
+                       (crates/guardian-provider-api/src/ids.rs) alongside
+                       CapabilityId/ProviderId. This is a deliberate
+                       decision, not a default-by-inertia: no gate through
+                       G7 has introduced a generated/external identity
+                       requirement for events or incidents analogous to
+                       TransactionId's — both are still constructed from
+                       caller-supplied, dotted-domain-shaped values in
+                       every accepted test and code path, and changing
+                       their validator now would be an unmotivated
+                       redesign, not a bug fix.
+```
+
+**Future owner/trigger:** the first gate that needs to construct an
+`EventId` or `IncidentId` from a *generated* source (e.g. a UUID-shaped
+value produced by a provider, a correlation ID minted by the daemon
+rather than supplied by a human/config) rather than a caller-supplied
+dotted-domain name must, at that time, explicitly decide whether to give
+`EventId`/`IncidentId` their own bespoke validator (mirroring
+`TransactionId`'s resolution) or keep the shared macro — and must record
+that decision rather than silently reusing whichever validator happens to
+compile. No specific gate number is assigned; this trigger is
+condition-based, not schedule-based.
+
 ## Evidence index (referenced, not duplicated here)
 
 ```text
