@@ -250,6 +250,52 @@ case above, which gets its own verdict), verdict is
 
 ---
 
+# 9A. Cancellation / expiry-during-mutation audit (state-model safety)
+
+The implementation handoff's §4.1/§17.4 restrict `CANCELLED`/`EXPIRED` to
+being legal successors only of `CREATED`, `VALIDATING`, `VALIDATED`,
+`AUTHORIZING`, and `AUTHORIZED` — never of `APPLYING`, `OBSERVING`, or
+`ROLLING_BACK` directly. This is a real safety invariant, not a style
+choice: those three states are exactly where an external provider mutation
+or a rollback restoration may be in flight or unresolved, and marking a
+transaction immutably terminal there would erase the reconciliation
+obligation the rest of the handoff (§18–§20) carefully builds.
+
+- Confirm the implemented transition function has no code path by which a
+  cancellation or expiry request causes a direct `APPLYING → CANCELLED`,
+  `APPLYING → EXPIRED`, `ROLLING_BACK → CANCELLED`, or `ROLLING_BACK →
+  EXPIRED` transition. Attempt a scratch mutation (in `/tmp`, never
+  committed) that adds exactly this shortcut and confirm a test catches it.
+- Confirm a cancellation/expiry request arriving during `APPLYING`,
+  `OBSERVING`, or `ROLLING_BACK` is recorded as a typed fact
+  (`cancellation_requested`/`deadline_expired` or equivalent, per §17.4)
+  without altering the transaction's governed path — the transaction must
+  still reach its outcome via the normal `APPLYING → OBSERVING|FAILED|
+  ROLLING_BACK`, `OBSERVING → COMMITTED|ROLLING_BACK|FAILED`,
+  `ROLLING_BACK → ROLLED_BACK|ROLLBACK_FAILED` transitions.
+- Confirm that once the transaction reaches `COMMITTED` or
+  `ROLLBACK_FAILED`, a pending cancellation/expiry request never overwrites
+  or bypasses that state — it is preserved as audit context only.
+- Confirm the seven tests required by implementation handoff §17.4 exist:
+  cancellation and expiry each pre-Apply (direct terminal transition is
+  fine there), each during `APPLYING`, each during `ROLLING_BACK`, and one
+  proving a request during `APPLYING`/`ROLLING_BACK` that ultimately
+  reaches `COMMITTED` leaves `COMMITTED` standing.
+- Confirm no delayed asynchronous `Apply` can occur after a pre-Apply
+  cancellation/expiry transition (e.g. a background authorization callback
+  resolving after the transaction is already `CANCELLED` must be rejected,
+  not silently allowed to reach `Apply`).
+
+If cancellation or expiry can cause an immediate terminal transition out of
+`APPLYING`, `OBSERVING`, or `ROLLING_BACK` — bypassing Apply/rollback
+reconciliation — or if a pending cancellation/expiry request can overwrite
+a `COMMITTED`/`ROLLBACK_FAILED` outcome, treat this as a transaction
+state-model safety defect: report `FAIL — TRANSACTION ORDERING UNSAFE` (or
+`FAIL — CONTRACT VIOLATION` if the defect is purely textual/specification,
+not yet implemented in code).
+
+---
+
 # 10. Crash recovery model audit
 
 Per the implementation handoff §20, confirm all six recovery
@@ -420,12 +466,14 @@ from G3, unmodified) and confirm:
 # 19. Adversarial questions (mirror the implementation handoff's §27, verify each independently)
 
 Report each as confirmed safe / confirmed unsafe / not applicable, with the
-specific file/test supporting the conclusion, for all 25 items listed in
-the implementation handoff's §27 (items 21-25 were added in this repair
-pass, covering Apply-intent-as-proof, crash-before-invocation
+specific file/test supporting the conclusion, for all 29 items listed in
+the implementation handoff's §27 (items 21-25 were added in an earlier
+repair pass, covering Apply-intent-as-proof, crash-before-invocation
 misclassification, duplicate real Apply calls, skipped-Observe-on-retry,
-and revision-proof-by-direct-mutation — do not skip these on the assumption
-they duplicate earlier items; verify each independently).
+and revision-proof-by-direct-mutation; items 26-29 were added in this
+repair pass, covering cancellation/expiry requested during `APPLYING` and
+during `ROLLING_BACK` — see §9A above — do not skip any of these on the
+assumption they duplicate earlier items; verify each independently).
 
 ---
 
@@ -455,6 +503,7 @@ failed) still passes unmodified, plus the new G4 tests, all green.
 6. Unknown privilege/access execution audit (§7)
 7. Authorization boundary regression audit (§8)
 8. Rollback model audit (§9)
+8a. Cancellation/expiry-during-mutation audit (§9A)
 9. Crash recovery model audit (§10)
 10. Persistence contract audit (§11)
 11. Duplicate-apply audit (§12)

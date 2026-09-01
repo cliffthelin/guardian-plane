@@ -167,7 +167,9 @@ AUTHORIZED     → APPLYING
 APPLYING       → OBSERVING | FAILED | ROLLING_BACK
 OBSERVING      → COMMITTED | ROLLING_BACK | FAILED
 ROLLING_BACK   → ROLLED_BACK | ROLLBACK_FAILED
-(any nonterminal) → CANCELLED | EXPIRED   (explicit external cancellation / deadline)
+(CREATED, VALIDATING, VALIDATED, AUTHORIZING, AUTHORIZED)
+                → CANCELLED | EXPIRED   (explicit external cancellation / deadline;
+                                          safe because no provider mutation has begun)
 ```
 
 `APPLYING → ROLLING_BACK` covers the case where `Apply` itself reports a
@@ -177,6 +179,13 @@ succeeded but observation determined the postcondition was not met
 (P0-TXN-005/006). A required test must prove at least one illegal
 transition (e.g. `COMMITTED → APPLYING`) is rejected, not merely that legal
 ones succeed.
+
+**`CANCELLED`/`EXPIRED` are legal successors only of the pre-mutation
+states listed above.** `APPLYING`, `OBSERVING`, and `ROLLING_BACK` are
+deliberately absent from this predecessor list — see §17.4 below for why a
+direct `APPLYING → CANCELLED`, `APPLYING → EXPIRED`, `ROLLING_BACK →
+CANCELLED`, or `ROLLING_BACK → EXPIRED` transition is unsafe and must not
+be implemented.
 
 ## 4.2 `TransactionRecord` (§14.1, verbatim fields — use guardian-core types
 where a G3 type already exists for the concept)
@@ -665,6 +674,95 @@ requiring recovery, and must be distinguishably represented (via
 Event/Incident integration (§21 below) can surface it, without G4 itself
 implementing that surfacing.
 
+## 17.4 Cancellation and expiry while `APPLYING` or `ROLLING_BACK` is in progress
+
+**This section resolves a genuine gap in an earlier draft of §4.1, which
+permitted `(any nonterminal) → CANCELLED | EXPIRED` without qualification.**
+Read literally, that rule would let `APPLYING → CANCELLED`, `APPLYING →
+EXPIRED`, `ROLLING_BACK → CANCELLED`, and `ROLLING_BACK → EXPIRED` all be
+implemented as direct transitions. That is unsafe: `CANCELLED` and
+`EXPIRED` are terminal (§4, "Terminal states MUST be immutable"), and a
+transaction may be marked immutably terminal while an external provider
+mutation is already in flight, its result unknown, or a rollback attempting
+to undo it is itself unresolved. This would let a cancellation or deadline
+event erase the reconciliation obligation that §18–§20 otherwise go to
+considerable length to preserve (Apply-intent vs. Apply-outcome, the
+crash-boundary recovery table, `state-ambiguous`/`must-observe`
+classifications). A cancellation or deadline request cannot retroactively
+un-invoke a provider call already in flight, and it cannot make a
+`ROLLING_BACK` restoration attempt disappear.
+
+**Required invariant:** a cancellation or expiry *request* arriving while
+the transaction is `APPLYING`, `OBSERVING`, or `ROLLING_BACK` MUST NOT by
+itself cause an immediate transition to `CANCELLED` or `EXPIRED`. The
+transaction must continue through its normal governed path — `APPLYING →
+OBSERVING | FAILED | ROLLING_BACK`, `OBSERVING → COMMITTED | ROLLING_BACK |
+FAILED`, `ROLLING_BACK → ROLLED_BACK | ROLLBACK_FAILED` — exactly as it
+would without the request, until the transaction reaches one of those
+ordinary reconciled terminal/near-terminal outcomes. Only the request
+itself is durably recorded immediately (so it cannot be lost and so a
+human/audit consumer can see it was asked for).
+
+**Required representation:** record the request as a typed fact on
+`TransactionRecord` — conceptually `cancellation_requested: Option<Instant>`
+and/or `deadline_expired: bool` (exact naming is implementation latitude;
+do not add a new transaction state to represent "requested but not yet
+safe to honor"). This flag/field is orthogonal to the state machine, the
+same way `rollback_result: RollbackOutcome` is orthogonal to it (§17.2) —
+it carries evidence, it does not gate or short-circuit the legal
+transitions in §4.1.
+
+**Required reconciliation rule, once a normal terminal/near-terminal
+outcome is reached:**
+
+- If the transaction reaches `FAILED` with no mutation having occurred
+  (§14's clean-failure case), or reaches `ROLLED_BACK` (mutation was
+  undone and confirmed), reconciliation is complete and no obligation
+  remains — the engine MAY report the transaction's outward-facing terminal
+  state as `CANCELLED`/`EXPIRED` instead of `FAILED`/`ROLLED_BACK` **only**
+  if a cancellation/expiry request is on record, since no unresolved
+  external effect exists either way. (Whether to do this relabeling at all,
+  versus always keeping `FAILED`/`ROLLED_BACK` as the state and surfacing
+  the request only via the typed field, is implementation latitude — pick
+  one and be consistent. What is not latitude is reaching `CANCELLED`/
+  `EXPIRED` *before* this reconciliation is known.)
+- If the transaction instead reaches `COMMITTED` or `ROLLBACK_FAILED`, the
+  cancellation/expiry request is preserved as audit context only
+  (`cancellation_requested`/`deadline_expired` remain set) and the
+  transaction's true reconciled terminal state stands. A pending
+  cancellation or an elapsed deadline must never overwrite or bypass a
+  state that carries a real, unresolved-or-successful mutation outcome.
+- A cancellation/expiry request arriving during `CREATED`, `VALIDATING`,
+  `VALIDATED`, `AUTHORIZING`, or `AUTHORIZED` (before `Apply` begins, per
+  §4.1's unqualified predecessor list) is unaffected by this section and
+  may transition directly to `CANCELLED`/`EXPIRED` as before — no mutation
+  is possible yet. Confirm the fixture/authorization plumbing genuinely
+  guarantees no delayed asynchronous `Apply` can still occur after that
+  transition (e.g. a background authorization callback that resolves after
+  the transaction is already `CANCELLED` must be rejected, not silently
+  allowed to proceed to `Apply`).
+- A deadline elapsing does not, by itself, mean "stop trying to determine
+  what happened" — it means "do not begin a *new* operation." It cannot
+  make an already-started external side effect disappear or exempt the
+  engine from the same Observe-before-any-conclusion discipline §18.4
+  requires for ordinary recovery.
+
+**Required tests**, at minimum one per row:
+
+```text
+cancellation requested during CREATED/VALIDATING/…/AUTHORIZED → CANCELLED (no Apply ever occurs)
+expiry requested during CREATED/VALIDATING/…/AUTHORIZED       → EXPIRED (no Apply ever occurs)
+cancellation requested during APPLYING  → transaction does NOT immediately become CANCELLED;
+                                            it continues to a governed outcome (FAILED/OBSERVING/
+                                            ROLLING_BACK) and the request is preserved as evidence
+expiry requested during APPLYING        → same, for EXPIRED
+cancellation requested during ROLLING_BACK → transaction does NOT immediately become CANCELLED;
+                                               rollback continues to ROLLED_BACK/ROLLBACK_FAILED
+expiry requested during ROLLING_BACK       → same, for EXPIRED
+cancellation/expiry requested, transaction reaches COMMITTED → COMMITTED stands; request recorded
+                                                                 as context only, not honored
+```
+
 ---
 
 # 18. Lost response / duplicate apply (P0-TXN-009)
@@ -1077,6 +1175,15 @@ completion report, matching G3's evidentiary standard.
     rather than by changing the `ArbitrationStateSource` fixture's
     authoritative state and letting G4's own code re-derive a different
     value (§7.2)?
+26. cancellation requested during `APPLYING` — does the transaction ever
+    become `CANCELLED` before the Apply-outcome is reconciled (§17.4)?
+27. expiry requested during `APPLYING` — same question for `EXPIRED`
+    (§17.4)?
+28. cancellation requested during `ROLLING_BACK` — does the transaction
+    ever become `CANCELLED` before rollback reaches `ROLLED_BACK`/
+    `ROLLBACK_FAILED` (§17.4)?
+29. expiry requested during `ROLLING_BACK` — same question for `EXPIRED`
+    (§17.4)?
 
 ---
 
@@ -1111,10 +1218,12 @@ model actually implemented, the five persistence-ordering crash-boundary
 tests' results (§19.1), and the crash-before-`Apply` test's result (§18.6);
 where `PrivilegeRequirement::Unknown` is checked and by which function
 (§6); the persistence schema version and atomic-write mechanism (§19); the
-six recovery-classification tests and their results (§20); the §27
-adversarial self-check results item-by-item (all 25 items), including
-which were executed as real scratch mutations vs. reasoned by inspection
-(mirror G3's audit-survivable standard, don't just claim it); full `cargo
+six recovery-classification tests and their results (§20); the
+cancellation/expiry-during-mutation model actually implemented and its
+seven required tests' results (§17.4); the §27 adversarial self-check
+results item-by-item (all 29 items), including which were executed as real
+scratch mutations vs. reasoned by inspection (mirror G3's
+audit-survivable standard, don't just claim it); full `cargo
 fmt --check` / `cargo clippy --workspace --all-targets --all-features --
 -D warnings` / `cargo test --workspace` output; and an explicit statement
 of what was deferred to G5 or G8 and why.
