@@ -3,6 +3,7 @@ members = [
     "crates/guardian-core",
     "crates/guardian-provider-api",
     "crates/guardian-daemon",
+    "crates/guardian-helper",
     "crates/guardian-testkit",
 ]
 resolver = "2"

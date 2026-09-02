@@ -12,19 +12,27 @@ use std::future::Future;
 use crate::error::{GuardianDbusError, GuardianErrorCategory};
 use crate::identity::CallerIdentity;
 
-/// The four G1 test-only polkit actions (TDD contract §9). Production actions
-/// added in later gates get their own variants; this enum is deliberately
-/// G1-scoped.
+/// The four G1 test-only polkit actions (TDD contract §9), plus G7's one
+/// real production Class A action (`guardian-helper`'s sole bounded write —
+/// ADR-002's Privilege Requirement Inventory: "1 is Guardian's own bounded
+/// polkit-gated action"). Each later gate that adds a genuinely new
+/// polkit-gated operation gets its own variant here; this enum does not
+/// become a generic action-name carrier.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PolkitAction {
     Read,
     LowRiskWrite,
     ModerateWrite,
     HighRiskWrite,
+    /// G7's Class A Guardian-owned privileged mutation, authorized entirely
+    /// inside `guardian-helper` (G7 implementation handoff §2.3/§2.5).
+    GuardianBoundedWrite,
 }
 
 impl PolkitAction {
-    /// The exact polkit action identifier, as fixed by TDD contract §9.
+    /// The exact polkit action identifier, as fixed by TDD contract §9 (the
+    /// four `guardian.test.*` actions) and by the G7 implementation handoff
+    /// §9 for `GuardianBoundedWrite`.
     #[must_use]
     pub const fn action_id(self) -> &'static str {
         match self {
@@ -32,6 +40,7 @@ impl PolkitAction {
             Self::LowRiskWrite => "guardian.test.low-risk-write",
             Self::ModerateWrite => "guardian.test.moderate-write",
             Self::HighRiskWrite => "guardian.test.high-risk-write",
+            Self::GuardianBoundedWrite => "io.github.cliffthelin.guardian.g7.bounded-write",
         }
     }
 }

@@ -1,0 +1,26 @@
+[package]
+name = "guardian-helper"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "guardian-helper"
+path = "src/main.rs"
+
+[features]
+# Off by default -- NOT present in a plain `cargo build --release` used for
+# production install. Enables the artificial Apply-delay hook used only to
+# gather real crash-during-Apply VM evidence (P1-DMN-005). Never reachable
+# via D-Bus; only a local systemd `Environment=` (admin-controlled) can set
+# the underlying env var, and only when this feature was compiled in.
+evidence-hooks = []
+
+[dependencies]
+guardian-core = { path = "../guardian-core" }
+guardian-provider-api = { path = "../guardian-provider-api" }
+zbus = { workspace = true, features = ["blocking-api"] }
+
+[lints]
+workspace = true

@@ -153,6 +153,8 @@ impl AuthProbe {
             PolkitAction::LowRiskWrite => counts.low += 1,
             PolkitAction::ModerateWrite => counts.moderate += 1,
             PolkitAction::HighRiskWrite => counts.high += 1,
+            // G7's action, not exercised by this G1-scoped fixture.
+            PolkitAction::GuardianBoundedWrite => {}
         }
         Ok(())
     }

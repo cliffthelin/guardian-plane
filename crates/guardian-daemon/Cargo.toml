@@ -5,11 +5,16 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[[bin]]
+name = "guardian-daemon"
+path = "src/bin/guardian-daemon.rs"
+
 [dependencies]
-zbus.workspace = true
+guardian-core = { path = "../guardian-core" }
+guardian-provider-api = { path = "../guardian-provider-api" }
+zbus = { workspace = true, features = ["blocking-api"] }
 
 [dev-dependencies]
-guardian-core = { path = "../guardian-core" }
 guardian-testkit = { path = "../guardian-testkit" }
 roxmltree.workspace = true
 
