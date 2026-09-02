@@ -10,6 +10,7 @@ name = "guardian-daemon"
 path = "src/bin/guardian-daemon.rs"
 
 [dependencies]
+async-io = "2.6.0"
 guardian-core = { path = "../guardian-core" }
 guardian-provider-api = { path = "../guardian-provider-api" }
 zbus = { workspace = true, features = ["blocking-api"] }

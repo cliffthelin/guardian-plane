@@ -369,6 +369,7 @@ dependencies = [
  "async-io",
  "guardian-provider-api",
  "guardian-testkit",
+ "rustix",
  "zbus",
 ]
 
@@ -376,6 +377,7 @@ dependencies = [
 name = "guardian-daemon"
 version = "0.1.0"
 dependencies = [
+ "async-io",
  "guardian-core",
  "guardian-provider-api",
  "guardian-testkit",

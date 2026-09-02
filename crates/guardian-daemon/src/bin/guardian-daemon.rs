@@ -2,8 +2,19 @@
 //! B; G7 implementation handoff §2). Owns `io.github.cliffthelin.Guardian1`
 //! on the real system bus. Never relays a client's privileged write
 //! request to `guardian-helper` (§2.3) — this binary has no code path that
-//! constructs a call against `GuardianHelper1` at all, and has no D-Bus
-//! client/proxy construction of any kind.
+//! constructs a call against `GuardianHelper1`, and never will while
+//! `GuardianHelper1` remains the sole privileged-mutation surface.
+//!
+//! **G8 update to the G7 "no D-Bus client/proxy construction" claim**: G7's
+//! original doc comment stated this binary constructed no D-Bus client/
+//! proxy of any kind. That was true at G7 and is no longer true: G8 adds
+//! exactly six read-only provider client proxies
+//! ([`guardian_core::providers`] — systemd1, `PSI`, login1, `UDisks2`,
+//! `UPower`, `Accounts`), driven from [`capability_registry_tick`]. None of
+//! the six is `GuardianHelper1`; none performs a write; the G7 invariant
+//! this comment originally protected (never proxying to the privileged
+//! helper) is unchanged and still holds. Only the broader, imprecise
+//! restatement of that invariant needed correcting.
 //!
 //! **Repair of the independent audit's public-API-scope finding**: this
 //! binary previously served an additive `Guardian1.Transactions1` object
@@ -16,6 +27,8 @@
 //! ownership, no helper involvement) is proved instead by a disposable
 //! prototype under `tests/vm/g7-class-b-prototype/`, following the same
 //! precedent G2's Model B evidence used — never merged into production.
+//! G8's Capability Registry population is internal state only (handoff
+//! §12) — it adds no new `Guardian1` object or method either.
 //!
 //! **Repair of the independent audit's G5 FC-2 finding**: this binary
 //! evaluates `guardian_core::budget::recorder_policy_for()` on a real,
@@ -32,14 +45,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use guardian_core::budget::{self, FreeSpaceState};
 use guardian_core::event::Event;
+use guardian_core::providers::udisks::{TopologyTracker, UdisksProvider};
 use guardian_core::recorder::BoundedRecorder;
 use guardian_core::risk::Risk;
 use guardian_daemon::GuardianContract;
-use guardian_provider_api::{EventId, ProviderId};
+use guardian_provider_api::{CapabilityRecord, EventId, ProviderId};
 
 const WELL_KNOWN_NAME: &str = "io.github.cliffthelin.Guardian1";
 const OBJECT_PATH: &str = "/io/github/cliffthelin/Guardian1";
 const PROVIDER_ID: &str = "guardian.g7.daemon-monitor";
+const CAPABILITY_REGISTRY_TICK_INTERVAL: Duration = Duration::from_secs(30);
 const RECORDER_CAPACITY: usize = 256;
 const MONITORING_TICK_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -124,6 +139,36 @@ fn monitoring_tick(recorder: &Mutex<BoundedRecorder>, state: &Path) {
     );
 }
 
+/// Real, internal G8 Capability Registry population (implementation
+/// handoff §11/§12): connects to the real system bus as a client — the
+/// six read-only provider proxies described in the module doc — and logs
+/// a genuine snapshot. This is internal `guardian-daemon` state only: no
+/// `Guardian1` object or method exposes it to any client (handoff §12
+/// assigns that to G9, when a real consumer exists). One provider being
+/// unreachable never stops the others: [`guardian_core::providers::
+/// registry::populate_registry`] treats each of the six independently.
+fn capability_registry_tick(connection: &zbus::Connection) -> Vec<CapabilityRecord> {
+    let records = async_io::block_on(guardian_core::providers::registry::populate_registry(
+        connection,
+    ));
+    let available = records
+        .iter()
+        .filter(|r| r.availability.is_usable())
+        .count();
+    eprintln!(
+        "[guardian-daemon] capability registry tick: {available}/{} capabilities available",
+        records.len()
+    );
+    records
+}
+
+fn replace_registry_snapshot(
+    snapshot: &Mutex<Vec<CapabilityRecord>>,
+    records: Vec<CapabilityRecord>,
+) {
+    *snapshot.lock().unwrap() = records;
+}
+
 fn main() -> zbus::Result<()> {
     let state = state_dir();
     fs::create_dir_all(&state).expect("create daemon state directory");
@@ -137,6 +182,44 @@ fn main() -> zbus::Result<()> {
         loop {
             monitoring_tick(&recorder_for_thread, &state_for_thread);
             std::thread::sleep(MONITORING_TICK_INTERVAL);
+        }
+    });
+
+    // A second, genuine system-bus connection dedicated to the G8
+    // Capability Registry's six read-only provider proxies — kept
+    // entirely separate from the `Guardian1`-serving connection below, so
+    // a provider read never shares a connection with (or can block) the
+    // daemon's own served object.
+    let registry_snapshot = std::sync::Arc::new(Mutex::new(Vec::<CapabilityRecord>::new()));
+    let registry_snapshot_for_thread = std::sync::Arc::clone(&registry_snapshot);
+    std::thread::spawn(move || {
+        let mut topology_tracker = TopologyTracker::new();
+        loop {
+            // Reconnect each bounded cycle. A missing bus or a connection
+            // lost since the previous cycle therefore cannot permanently
+            // kill this worker or retain a stale healthy snapshot.
+            match async_io::block_on(zbus::Connection::system()) {
+                Ok(registry_connection) => {
+                    replace_registry_snapshot(
+                        &registry_snapshot_for_thread,
+                        capability_registry_tick(&registry_connection),
+                    );
+                    if let Ok(topology) =
+                        async_io::block_on(UdisksProvider::new(&registry_connection).topology())
+                    {
+                        for event in topology_tracker.observe(&topology) {
+                            eprintln!("[guardian-daemon] UDisks topology event: {event:?}");
+                        }
+                    }
+                }
+                Err(error) => {
+                    replace_registry_snapshot(&registry_snapshot_for_thread, Vec::new());
+                    eprintln!(
+                        "[guardian-daemon] capability registry: system bus unavailable; retrying: {error}"
+                    );
+                }
+            }
+            std::thread::sleep(CAPABILITY_REGISTRY_TICK_INTERVAL);
         }
     });
 
@@ -155,7 +238,7 @@ fn main() -> zbus::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{monitoring_tick, probe_free_space};
+    use super::{monitoring_tick, probe_free_space, replace_registry_snapshot};
     use guardian_core::budget::FreeSpaceState;
     use guardian_core::recorder::BoundedRecorder;
     use std::sync::Mutex;
@@ -207,5 +290,14 @@ mod tests {
             3,
             "the 3 oldest ticks must be counted as dropped"
         );
+    }
+
+    #[test]
+    fn registry_snapshot_is_replaced_not_retained_after_outage() {
+        let snapshot = Mutex::new(vec![
+            guardian_core::providers::registry::psi_capabilities().remove(0),
+        ]);
+        replace_registry_snapshot(&snapshot, Vec::new());
+        assert!(snapshot.lock().unwrap().is_empty());
     }
 }
