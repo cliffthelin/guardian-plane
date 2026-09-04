@@ -1,5 +1,7 @@
 //! Minimal, read-only G0 D-Bus contract export.
 
+pub mod dbus_surface;
+
 pub const INTERFACE_NAME: &str = "io.github.cliffthelin.Guardian1";
 pub const OBJECT_PATH: &str = "/io/github/cliffthelin/Guardian1";
 

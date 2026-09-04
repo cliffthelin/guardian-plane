@@ -30,6 +30,18 @@
 //! G8's Capability Registry population is internal state only (handoff
 //! §12) — it adds no new `Guardian1` object or method either.
 //!
+//! **G9 update**: this binary now also serves three real, read-only
+//! interfaces at their own object paths — `Capabilities1`, `Incidents1`,
+//! `Transactions1` (`crates/guardian-daemon/src/dbus_surface.rs`, ADR-001's
+//! own worked example for the shape). `Guardian1` remains exactly
+//! `ContractVersion`/`ServiceState`; none of the three new interfaces
+//! shares an object path or method with it. `Incidents1`/`Transactions1`
+//! are genuinely, honestly empty in this gate (no incident producer, no
+//! daemon-side transaction store exists) — see `dbus_surface`'s own doc
+//! comment for the two paths this explicitly forbids for populating
+//! `Transactions1` (reading `guardian-helper`'s state; any new
+//! `guardian-daemon` -> `GuardianHelper1` call).
+//!
 //! **Repair of the independent audit's G5 FC-2 finding**: this binary
 //! evaluates `guardian_core::budget::recorder_policy_for()` on a real,
 //! periodic, no-privilege monitoring tick and records a real `Event` into
@@ -48,7 +60,7 @@ use guardian_core::event::Event;
 use guardian_core::providers::udisks::{TopologyTracker, UdisksProvider};
 use guardian_core::recorder::BoundedRecorder;
 use guardian_core::risk::Risk;
-use guardian_daemon::GuardianContract;
+use guardian_daemon::{GuardianContract, dbus_surface};
 use guardian_provider_api::{CapabilityRecord, EventId, ProviderId};
 
 const WELL_KNOWN_NAME: &str = "io.github.cliffthelin.Guardian1";
@@ -223,9 +235,26 @@ fn main() -> zbus::Result<()> {
         }
     });
 
+    // G9's three read-only interfaces, each a separate interface major at
+    // its own object path (per ADR-001's own worked example) — never
+    // bolted onto the frozen `Guardian1` object above. `Capabilities1`
+    // shares the same `registry_snapshot` the worker thread above already
+    // maintains; it never opens a second registry connection of its own.
     let connection = zbus::blocking::connection::Builder::system()?
         .name(WELL_KNOWN_NAME)?
         .serve_at(OBJECT_PATH, GuardianContract::default())?
+        .serve_at(
+            dbus_surface::CAPABILITIES_OBJECT_PATH,
+            dbus_surface::Capabilities1::new(std::sync::Arc::clone(&registry_snapshot)),
+        )?
+        .serve_at(
+            dbus_surface::INCIDENTS_OBJECT_PATH,
+            dbus_surface::Incidents1,
+        )?
+        .serve_at(
+            dbus_surface::TRANSACTIONS_OBJECT_PATH,
+            dbus_surface::Transactions1,
+        )?
         .build()?;
     eprintln!(
         "[guardian-daemon] serving {WELL_KNOWN_NAME} at {OBJECT_PATH}, unique_name={}",

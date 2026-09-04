@@ -1,16 +1,27 @@
 # Guardian Phase 1 Implementation Handoff
 ## G9 — Clients & Packaging
 
-Baseline: HEAD `196523fcf7a1df14818236a371f2b85eafebdd47` ("docs: define
-G8 initial provider gate"). G8's implementation candidate exists as
-uncommitted working-tree state on top of this baseline (six read-only
-providers, Capability Registry population, evidence under
-`docs/evidence/g8/`) and is **not yet tagged** — it is awaiting a fresh
-independent audit of its two previously-blocking IDs, which real evidence
-has since closed (see `docs/evidence/g8/G8_EVIDENCE_REPORT.md`'s "Final
-verification pass"). This handoff assumes G8 will pass that audit and
-tag `phase0-g8-initial-providers`, but does not itself depend on the tag
-existing yet — G9's own scope does not touch G8's provider code.
+Baseline: HEAD `3384ed7ededdce8067d6e8615f4e0a7dc5799d2a` ("docs: define
+G9 clients & packaging gate"). **G8 is closed**: independently accepted,
+committed at `acee16c`, tagged `phase0-g8-initial-providers`, and
+published (`git rev-parse origin/main` includes both commits). G9's own
+scope does not touch G8's provider code.
+
+**Repair note (this revision):** an independent planning review of the
+prior revision of this handoff returned `FAIL — G9 PUBLIC API PLAN
+AMBIGUOUS`, with two further blockers on packaging/privilege and
+toolkit/session-autostart that would independently have failed on their
+own. All three are repaired below, grounded in two new decision
+records this repair adds: `docs/adr/ADR-007-guardian-gui-tui-client-separation.md`
+(GUI = GTK4/libadwaita via `gtk4-rs`, TUI = `ratatui`, both decided now
+rather than left to implementer discretion) and
+`docs/adr/ADR-008-guardian-package-filesystem-layout.md` (which promoted
+G7 artifacts are packaged verbatim, which one file — the G7 evidence-
+only polkit bypass rule — must never be packaged, and the exact
+session-autostart mechanism and vendor path). The review's other
+findings (write-capability adjudication, five-surface set, G6/indicator
+reuse, `Guardian1` freeze, dropping `RequestTransaction`, incident/
+transaction scope) were confirmed sound and are unchanged.
 
 # 1. The central planning finding — read this before anything else
 
@@ -171,21 +182,26 @@ Do not add Snap/Flatpak/AppImage packaging — only the Debian package
   this project's own established "no giant generic framework" discipline
   applied to client architecture instead of provider architecture.
 
-## 5.1 Toolkit selection requires an ADR — none exists yet
+## 5.1 Toolkit selection — resolved by ADR-007
 
-No GUI or TUI toolkit is mandated anywhere in the contract, and no prior
-ADR selects one (checked directly — `docs/guardian/30_TDD/GUARDIAN_
-PHASE_0_1_TDD_CONTRACT.md` and `docs/guardian/20_Control_Plane/
-Client_Surfaces.md` name no toolkit). An independent planning review of
-this handoff found this gap: choosing a GUI toolkit (e.g. GTK4, `egui`,
-`iced`) and a TUI toolkit (e.g. `ratatui`, `cursive`) is exactly the
-kind of architectural decision AGENTS.md requires an ADR for — the same
-discipline G6 already applied to the indicator-mechanism choice.
-**Before writing GUI/TUI production code, add a new ADR** (context,
-decision, alternatives considered, evidence, consequences) covering at
-minimum the GUI toolkit, and the TUI toolkit if a real choice exists
-between candidates rather than one obvious option. Do not pick a
-toolkit ad hoc mid-implementation with no documented rationale.
+**Repaired.** The prior draft's search for an existing toolkit decision
+checked only the contract and `Client_Surfaces.md`, missing that
+`docs/guardian/00_Project/GUARDIAN_MASTER_SPEC.md` (governance rank 4)
+already names GTK4/libadwaita and `ratatui` — real context, but not
+itself an accepted architectural decision (it is explicitly hedged).
+Per contract §43, this decision belongs in the named record
+`ADR-007 GUI/TUI client separation`, not an unnumbered ad hoc ADR.
+
+**`docs/adr/ADR-007-guardian-gui-tui-client-separation.md` is now
+accepted, written as part of this repair.** GUI = GTK4 + libadwaita via
+`gtk4-rs`; TUI = `ratatui`. Both chosen with real alternatives
+considered (`egui`/`iced` for GUI, `cursive` for TUI) and grounded in
+the master spec's own reference-UI comparison point and Guardian's
+thin-client/single-toolchain discipline — read the ADR for full
+reasoning. G9 implementation MUST follow this decision, not re-open it;
+if real implementation evidence finds either choice genuinely
+insufficient, that is a finding for a future gate to supersede with
+real comparative evidence, not a mid-implementation swap.
 
 # 6. Public D-Bus surface expansion — the actual new production work
 
@@ -196,29 +212,72 @@ part most likely to attract scope creep. Ground every design choice in
 but the **shape** (separate interface majors per concern, stable
 introspectable object hierarchy) is.
 
-## 6.1 What must exist
+## 6.1 What must exist — fixed now, not left to implementer discretion
 
-- `<namespace>.Guardian.Capabilities1` at `/<namespace>/Guardian1/
-  Capabilities` (or equivalently-shaped naming the implementer selects
-  and documents) — a **read-only** view over G8's real, live Capability
-  Registry snapshot (the same `Vec<CapabilityRecord>` the G8 registry
-  thread already maintains internally). No new capability logic; this
-  interface is a serialization layer, nothing else.
-- `<namespace>.Guardian.Incidents1` — a **read-only** view over G3's
-  real incident model. If no real incident-producing path exists yet in
-  production (mechanically check: does anything today construct and
-  persist a real `Incident`, or does only G3's own test fixture data
-  exist?), this interface correctly, honestly returns an empty list —
-  document which case is true, do not assume.
-- `<namespace>.Guardian.Transactions1` — a **read-only, list-only** view
-  over whatever real transaction history exists. Per §1's central
-  finding, this will be empty in a real production run — verify and
-  state this explicitly rather than leaving it ambiguous. This
-  interface has no write/request method this gate (see §6.2).
-- A read-only PSI summary surface (§32 requires "read-only PSI summary"
-  in the GUI) — reuse G8's real `providers::psi` reads, exposed via
-  whichever of the above interfaces (or a small fourth one) fits best;
-  document the choice.
+An independent planning review found the prior draft left the exact
+interface/object/member list, and the justification for each interface,
+to the implementer ("or equivalently-shaped naming the implementer
+selects," "or a small fourth [interface]"). Per §7.3 these are one-way
+doors (removal/renaming requires a new interface major), so this
+repair fixes the list now, citing ADR-001's own naming precedent and
+distinguishing this proposal from the one prior-gate precedent that
+matters: **G7's own independent audit struck an earlier
+`Guardian1.Transactions1` addition as "an unjustified permanent
+production API addition"** (`docs/evidence/g7/G7_MILESTONE.md`,
+Round 1 finding). That removed interface carried a *write* method
+(`AttemptProviderDelegatedWrite`); the one below carries none — but the
+name recurring means this handoff must explicitly justify why minting
+it now is different, not silently reuse a name a prior audit rejected.
+
+**Exactly three interfaces, fixed:**
+
+- **`io.github.cliffthelin.Guardian.Capabilities1`** at
+  `/io/github/cliffthelin/Guardian1/Capabilities` (ADR-001's own
+  worked example, cited verbatim). One method,
+  `ListCapabilities() -> a(...)`, serializing the real, live G8
+  Capability Registry snapshot directly (§6.3). **Justification:**
+  P1-GUI-001/P1-CLI-001 require rendering real capability state; no
+  weaker alternative exists since this is the only real store G9 needs
+  to expose. Also carries the read-only PSI summary (§32) as a second
+  method, `PsiSummary() -> (...)`, reusing G8's real `providers::psi`
+  reads directly — folded in here rather than minting a fourth
+  interface, since PSI is itself one of G8's six capability domains.
+- **`io.github.cliffthelin.Guardian.Incidents1`** at
+  `/io/github/cliffthelin/Guardian1/Incidents`. One method,
+  `ListIncidents() -> a(...)`, serializing G3's real `Incident` type
+  (§6.3). **Finding, not an exercise for the implementer:** mechanically
+  checked directly (`grep -rn 'Incident {' crates/*/src/`) —
+  **nothing in production anywhere constructs an `Incident`.** No
+  incident producer or persistence path exists in this codebase as of
+  G9's start. `ListIncidents()` therefore returns a real, live, always-
+  empty list in this gate — genuinely queried, not hardcoded, so a
+  future gate that does add a producer needs no interface change, only
+  a populated backing store. **Do not build an incident store to make
+  this list non-empty** — that is Phase 2 correlation scope (§47) and
+  explicitly out of bounds for G9.
+- **`io.github.cliffthelin.Guardian.Transactions1`** at
+  `/io/github/cliffthelin/Guardian1/Transactions`. One method,
+  `ListTransactions() -> a(...)`, list-only, no write/request method of
+  any kind (§6.2). **Finding, not an exercise:** the daemon binary
+  today has zero transaction persistence — `grep -rn 'transactions_dir'
+  crates/` shows this exists only in `guardian-helper`, under
+  `root:root` ownership. `ListTransactions()` serves the **daemon's
+  own** transaction state (real, live, currently empty), never
+  helper's. **Two paths are explicitly forbidden, by name, for
+  populating this interface, because either would breach G7's
+  independently-evidenced privilege separation:**
+  1. `guardian-daemon` reading `/var/lib/guardian/helper/` in any form
+     (the directory's real mode is `0750 root:root`; G7's own VM
+     evidence proved `guardiand` cannot read it — this must remain
+     true after G9);
+  2. `guardian-daemon` constructing any new proxy/call into
+     `GuardianHelper1` to read transaction data (§5 already forbids
+     writing to it; this extends the same prohibition to reads).
+
+  If a future gate needs real cross-process transaction visibility, it
+  must design that deliberately (e.g. a narrow, explicitly-authorized
+  read-only helper method, evidenced the way `GuardedWrite` itself was)
+  — G9 does not improvise it to make an empty list look more populated.
 
 ## 6.2 What must not exist
 
@@ -294,28 +353,38 @@ proving them again against **real** `guardian-daemon` data (not G6's
 disposable stub), which is exactly why `P1-IND-001`/`002` exist as
 separate IDs from G6's `P0-IND-*`.
 
-## 7.5 Packaging (§38 P1-PKG-*)
+## 7.5 Packaging (§38 P1-PKG-*) — resolved by ADR-008
 
-Real `.deb`, real fresh-VM install, real vendor paths (`/usr/share/
-dbus-1/system.d/`, `/usr/lib/systemd/system/` or equivalent, polkit
-policy directory), real uninstall leaving user/admin state intact,
-real purge removing it, and an explicit, mechanical check that install
-never touches another package's files (§40's forbidden-shortcuts list
-repeats this exact prohibition).
+**Repaired.** `docs/adr/ADR-008-guardian-package-filesystem-layout.md`
+is now accepted and is the binding source of truth for every packaged
+file. Implementation must follow it exactly, in particular:
+
+- `debian/guardian-daemon.service`/`guardian-helper.service` are
+  promoted **byte-identical** (modulo `ExecStart=` path) from
+  `docs/evidence/g7/guardian-{daemon,helper}.service` — the exact units
+  G7's independent audit measured with `systemd-analyze security`. Do
+  not hand-write fresh units.
+- `debian/io.github.cliffthelin.guardian.g7.policy` is promoted
+  unchanged from `docs/evidence/g7/` (safe `allow_*=no` defaults).
+  **`docs/evidence/g7/50-guardian-g7.rules` MUST NEVER be packaged** —
+  it is a VM-evidence-only bypass rule granting a hardcoded test
+  account unconditional access to the privileged write action. The
+  completion report must show `dpkg -c` output confirming its absence.
+- `debian/io.github.cliffthelin.{Guardian1,GuardianHelper1}.conf`
+  promoted unchanged from `docs/evidence/g7/` to
+  `/usr/share/dbus-1/system.d/`.
+- State directories/system-user creation, purge-vs-remove semantics,
+  and the session-autostart mechanism/vendor path (§8/§9 below) are
+  all fixed in ADR-008 — do not re-decide any of them here.
 
 **Preserve G7's disjoint-ownership/privilege separation in the package
-itself** — an independent planning review of this handoff found this
-was left implicit and required it stated explicitly. G7's milestone
-record established `guardian-daemon` (unprivileged, `guardiand:
-guardiand`, owns `/var/lib/guardian/daemon/`) and `guardian-helper`
-(privileged, `root:root`, owns `/var/lib/guardian/helper/`) as two
-processes with disjoint state ownership and no shared mutable
-authorization state. The `.deb` MUST install each binary with the
-correct systemd unit `User=`/`Group=` and correct filesystem ownership
-per binary, and MUST NOT merge, share, or weaken this separation for
-packaging convenience — verify this with real, post-install
-`ls -l`/`systemctl show` evidence in the VM, not by assuming the
-systemd unit files alone are sufficient proof.
+itself.** The `.deb` MUST install each binary with the correct systemd
+unit `User=`/`Group=` and correct filesystem ownership per binary, and
+MUST NOT merge, share, or weaken this separation for packaging
+convenience — verify this with real, post-install `ls -l`/
+`systemctl show`/`systemd-analyze security` evidence in the VM
+(re-measuring, not merely re-installing the same units and assuming),
+not by assuming the promoted unit files alone are sufficient proof.
 
 # 8. Indicator reuse discipline — do not re-litigate G6
 
@@ -358,13 +427,18 @@ via proper desktop session autostart (cleaned up by `systemd-logind` on
 logout), not as a detached background process" — ADR-006's own words,
 recorded after a real Xfce stale-registration defect
 (`G6_LOGOUT_LOGIN_LIFECYCLE_EVIDENCE.md`) caused by exactly this
-mistake. `guardian-indicator` MUST be launched via a real desktop
-autostart mechanism (e.g. an XDG autostart `.desktop` entry, or a
-systemd `--user` unit with correct `WantedBy=graphical-session.target`)
-in both production packaging and VM evidence gathering — never via a
-detached SSH background process (`nohup ... &`) during evidence
-collection, which would look passing without proving real session
-lifecycle behavior.
+mistake. **Repaired — mechanism decided, not left open.** Per
+ADR-008 §5, `guardian-indicator` MUST be launched via a real XDG
+autostart `.desktop` entry at `/etc/xdg/autostart/guardian-indicator.desktop`
+— not a systemd `--user` unit (rejected in ADR-008 precisely because
+GNOME's and Xfce's `graphical-session.target` integration are not
+equivalent, the exact per-desktop discrepancy ADR-006's own evidence
+history warns about). This applies identically in production packaging
+and VM evidence gathering — never via a detached SSH background process
+(`nohup ... &`) during evidence collection, which would look passing
+without proving real session lifecycle behavior. VM evidence must
+include a real logout with real process inspection confirming no
+orphaned indicator process survives (ADR-008 §5).
 
 # 9. Forward constraints from prior gates — confirm, do not close
 

@@ -2,7 +2,7 @@
 title: "TDD Gate Index"
 kind: "tdd-index"
 status: "active"
-last_reviewed: "2026-09-02"
+last_reviewed: "2026-09-03"
 tags:
   - tdd
   - gates
@@ -22,7 +22,7 @@ This page is a navigation layer over the governing [Phase 0/1 TDD Contract](GUAR
 | G6 | Indicator decision — **PASS, tagged `phase0-g6-indicator-decision`** | [StatusNotifierItem](../10_Platform/StatusNotifierItem.md), [Client Surfaces](../20_Control_Plane/Client_Surfaces.md) | [Implementation](GUARDIAN_G6_IMPLEMENTATION_HANDOFF.md), [Independent review](GUARDIAN_G6_INDEPENDENT_REVIEW_HANDOFF.md), [ADR-006](../../adr/ADR-006-guardian-indicator-mechanism.md), [Milestone](../../evidence/g6/G6_MILESTONE.md) |
 | G7 | Production daemon — **PASS, tagged `phase0-g7-production-daemon`** | [Architecture](../20_Control_Plane/Architecture.md), [Privilege](../20_Control_Plane/Privilege_and_Authorization.md) | [Implementation](GUARDIAN_G7_IMPLEMENTATION_HANDOFF.md), [Independent review](GUARDIAN_G7_INDEPENDENT_REVIEW_HANDOFF.md), [Milestone](../../evidence/g7/G7_MILESTONE.md) |
 | G8 | Initial providers — **PASS, tagged `phase0-g8-initial-providers`** | [Platform Index](../10_Platform/INDEX.md) | [Implementation](GUARDIAN_G8_IMPLEMENTATION_HANDOFF.md), [Independent review](GUARDIAN_G8_INDEPENDENT_REVIEW_HANDOFF.md), [Milestone](../../evidence/g8/G8_MILESTONE.md) |
-| G9 | Clients & packaging — **not implemented; handoffs prepared** | [Client Surfaces](../20_Control_Plane/Client_Surfaces.md), [ADR-006](../../adr/ADR-006-guardian-indicator-mechanism.md) | [Implementation](GUARDIAN_G9_IMPLEMENTATION_HANDOFF.md), [Independent review](GUARDIAN_G9_INDEPENDENT_REVIEW_HANDOFF.md) |
+| G9 | Clients & packaging — **PASS, tagged `phase0-g9-clients-packaging`** | [Client Surfaces](../20_Control_Plane/Client_Surfaces.md), [ADR-006](../../adr/ADR-006-guardian-indicator-mechanism.md), [ADR-007](../../adr/ADR-007-guardian-gui-tui-client-separation.md), [ADR-008](../../adr/ADR-008-guardian-package-filesystem-layout.md) | [Implementation](GUARDIAN_G9_IMPLEMENTATION_HANDOFF.md), [Independent review](GUARDIAN_G9_INDEPENDENT_REVIEW_HANDOFF.md), [Milestone](../../evidence/g9/G9_MILESTONE.md) |
 
 ## Rule
 
