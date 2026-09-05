@@ -43,6 +43,13 @@ pub struct PersistedTransactionRecord {
     pub state: TransactionState,
     pub arbitration_revision: Option<u64>,
     pub apply_outcome: Option<ApplyOutcome>,
+    /// The durable dispatch-start marker for the current Apply attempt (G4
+    /// handoff §19.1a, disclosed Wave-1-required G4 extension -- see
+    /// `crate::transaction::apply::ApplyRecord::dispatch_marker`). Absent
+    /// (defaults to `false` on load) in records written before this
+    /// extension existed, which is exactly the pre-extension semantics: no
+    /// marker means "provider dispatch definitely not entered."
+    pub dispatch_marker: bool,
     /// The most recent `Observe` result, if any -- required to classify a
     /// reloaded `Observing`-state record via
     /// [`crate::transaction::recovery::classify`] using real persisted
@@ -79,6 +86,10 @@ impl PersistedTransactionRecord {
             state: record.state,
             arbitration_revision,
             apply_outcome: record.apply_record.as_ref().map(|apply| apply.outcome),
+            dispatch_marker: record
+                .apply_record
+                .as_ref()
+                .is_some_and(|apply| apply.dispatch_marker),
             last_observation: record.observations.last().copied(),
             rollback_result: record.rollback_result,
             cancellation_requested: record.cancellation_requested,
@@ -98,6 +109,7 @@ impl PersistedTransactionRecord {
             state: self.state,
             apply_outcome: self.apply_outcome,
             last_observation: self.last_observation,
+            dispatch_marker: self.dispatch_marker,
         }
     }
 }
@@ -152,6 +164,9 @@ fn serialize(record: &PersistedTransactionRecord) -> String {
     }
     if let Some(outcome) = record.apply_outcome {
         lines.push(format!("apply_outcome={outcome}"));
+    }
+    if record.dispatch_marker {
+        lines.push(format!("dispatch_marker={}", record.dispatch_marker));
     }
     if let Some(observation) = record.last_observation {
         lines.push(format!("last_observation={observation}"));
@@ -220,6 +235,9 @@ fn deserialize(text: &str) -> Result<PersistedTransactionRecord, LoadError> {
             )
         })
         .transpose()?;
+    let dispatch_marker = fields
+        .get("dispatch_marker")
+        .is_some_and(|value| *value == "true");
     let last_observation = fields
         .get("last_observation")
         .map(|value| {
@@ -250,6 +268,7 @@ fn deserialize(text: &str) -> Result<PersistedTransactionRecord, LoadError> {
         state,
         arbitration_revision,
         apply_outcome,
+        dispatch_marker,
         last_observation,
         rollback_result,
         cancellation_requested,

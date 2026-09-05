@@ -214,6 +214,7 @@ fn base_persisted(transaction_id: TransactionId) -> PersistedTransactionRecord {
         state: TransactionState::Applying,
         arbitration_revision: Some(1),
         apply_outcome: None,
+        dispatch_marker: false,
         last_observation: None,
         rollback_result: None,
         cancellation_requested: false,
@@ -275,6 +276,134 @@ fn crash_boundary_2_durable_intent_before_provider_invocation_is_safe_to_resume_
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// **G4 extension (G4 handoff §19.1a; closes W1-REC-003/W1-VM-005)**:
+/// requirement 2's fixture above (`dispatch_marker: false`) is the "crash
+/// strictly before dispatch" case and correctly stays `SafeToResume`. This
+/// is its sibling: Apply-intent durable, dispatch marker *also* durable
+/// (the provider call was about to be, or was, invoked), but no concrete
+/// outcome ever got persisted -- e.g. a real `kill -9` during an in-flight
+/// provider call. This must now classify as `StateAmbiguous`, never
+/// `SafeToResume` and never `AlreadyCommitted`.
+#[test]
+fn crash_boundary_2b_dispatch_marker_set_but_outcome_never_recorded_is_state_ambiguous() {
+    let dir = temp_dir("boundary-2b");
+    let mut persisted = base_persisted(TransactionId::generate());
+    persisted.apply_outcome = Some(ApplyOutcome::NotRecorded);
+    persisted.dispatch_marker = true;
+    persist(&dir, &persisted).unwrap();
+
+    let loaded = load(&dir, &persisted.transaction_id).unwrap();
+    let classification = classify(loaded.to_recovery_snapshot());
+
+    assert_eq!(classification, RecoveryClassification::StateAmbiguous);
+    assert_ne!(classification, RecoveryClassification::SafeToResume);
+    assert_ne!(classification, RecoveryClassification::AlreadyCommitted);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Proves the *ordering* half of the G4 extension via the real, wired
+/// `engine::apply` path (not a hand-built fixture): the durable dispatch
+/// marker must already be readable from disk, with the outcome still
+/// `NotRecorded`, strictly *before* `provider.apply()` is ever invoked --
+/// this is what makes the crash-during-dispatch window real rather than
+/// theoretical. The fixture provider's own `apply()` implementation reads
+/// back the persisted record via a fresh, independent `load()` call as its
+/// very first action and records what it saw.
+#[test]
+fn dispatch_marker_is_durable_before_provider_apply_is_ever_invoked() {
+    struct OrderingProbeAdapter {
+        dir: std::path::PathBuf,
+        transaction_id: std::cell::RefCell<Option<TransactionId>>,
+        observed_marker_before_call: Cell<Option<bool>>,
+        observed_outcome_was_not_recorded_before_call: Cell<Option<bool>>,
+    }
+
+    impl MutableCapabilityAdapter for OrderingProbeAdapter {
+        fn inspect(&self) -> Result<InspectionSnapshot, Unsupported> {
+            Ok(InspectionSnapshot("prior-state".to_owned()))
+        }
+
+        fn validate(&self, _action: &ActionRequest) -> Result<ValidationResult, Unsupported> {
+            Ok(ValidationResult("ok".to_owned()))
+        }
+
+        fn snapshot(&self, _action: &ActionRequest) -> Result<StateSnapshot, Unsupported> {
+            Ok(StateSnapshot("prior-state".to_owned()))
+        }
+
+        fn apply(&self, _action: &ActionRequest) -> Result<RawApplyOutcome, Unsupported> {
+            let transaction_id = self.transaction_id.borrow().clone().unwrap();
+            let on_disk = load(&self.dir, &transaction_id).expect(
+                "the durable Apply-intent record must already exist on disk by the time \
+                 provider.apply() is invoked",
+            );
+            self.observed_marker_before_call
+                .set(Some(on_disk.dispatch_marker));
+            self.observed_outcome_was_not_recorded_before_call.set(Some(
+                on_disk.apply_outcome == Some(ApplyOutcome::NotRecorded),
+            ));
+            Ok(RawApplyOutcome("confirmed_success".to_owned()))
+        }
+
+        fn observe(
+            &self,
+            _expectation: &ObservationExpectation,
+        ) -> Result<RawObservationOutcome, Unsupported> {
+            Ok(RawObservationOutcome("postcondition_met".to_owned()))
+        }
+
+        fn rollback(&self, _snapshot: &StateSnapshot) -> Result<RawRollbackOutcome, Unsupported> {
+            Ok(RawRollbackOutcome("confirmed_restored".to_owned()))
+        }
+    }
+
+    let dir = temp_dir("dispatch-marker-ordering");
+    let mut record = new_record();
+    let state_source = FixtureStateSource::new();
+    let authorizer = FixtureAuthorizer;
+    let provider = OrderingProbeAdapter {
+        dir: dir.clone(),
+        transaction_id: std::cell::RefCell::new(None),
+        observed_marker_before_call: Cell::new(None),
+        observed_outcome_was_not_recorded_before_call: Cell::new(None),
+    };
+
+    snapshot(&mut record, &provider, &state_source, 0).unwrap();
+    validate(&mut record, &base_capability(), &state_source).unwrap();
+    async_io::block_on(authorize(
+        &mut record,
+        &authorizer,
+        CallerIdentity::new(":1.42", Some(1000)),
+        PolkitAction::LowRiskWrite,
+        false,
+    ))
+    .unwrap();
+    *provider.transaction_id.borrow_mut() = Some(record.transaction_id.clone());
+
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
+
+    assert_eq!(
+        provider.observed_marker_before_call.get(),
+        Some(true),
+        "the dispatch marker must be durably set before provider.apply() is ever called"
+    );
+    assert_eq!(
+        provider.observed_outcome_was_not_recorded_before_call.get(),
+        Some(true),
+        "the outcome must still read NotRecorded from disk at the moment provider.apply() runs \
+         -- it is only overwritten after the provider call returns"
+    );
+    // And the final, post-return state is a genuine, concrete success --
+    // requirement 3 (known success remains known success), proven through
+    // this same real path.
+    assert_eq!(record.state, TransactionState::Observing);
+    let reloaded = load(&dir, &record.transaction_id).unwrap();
+    assert_eq!(reloaded.apply_outcome, Some(ApplyOutcome::ConfirmedSuccess));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Crash-boundary requirement 3: the provider may have run but its
 /// outcome was never durably recorded -- recovery must require Observe
 /// (ambiguity handling), never guess success or failure.
@@ -315,6 +444,41 @@ fn crash_boundary_4_apply_success_durable_outcome_survives_independent_reload() 
     let reloaded = load(&dir, &record.transaction_id).unwrap();
     assert_eq!(reloaded.state, TransactionState::Observing);
     assert_eq!(reloaded.apply_outcome, Some(ApplyOutcome::ConfirmedSuccess));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Requirement 4 (G4 extension regression guard): a known clean failure
+/// through the real, wired `engine::apply` path remains exactly what it
+/// was before this extension -- `ConfirmedFailureNoMutation`, `Failed`,
+/// `SafeToResume` on reload -- unaffected by the dispatch marker now also
+/// being durably set along the way.
+#[test]
+fn crash_boundary_4b_apply_failure_durable_outcome_survives_independent_reload() {
+    let mut record = new_record();
+    let provider = FixtureAdapter::new(false);
+    let state_source = FixtureStateSource::new();
+    let authorizer = FixtureAuthorizer;
+    let dir = temp_dir("boundary-4b");
+
+    drive_to_authorized(&mut record, &provider, &state_source, &authorizer);
+    apply(&mut record, &provider, &state_source, &dir, 1).unwrap();
+    assert_eq!(record.state, TransactionState::Failed);
+
+    let reloaded = load(&dir, &record.transaction_id).unwrap();
+    assert_eq!(reloaded.state, TransactionState::Failed);
+    assert_eq!(
+        reloaded.apply_outcome,
+        Some(ApplyOutcome::ConfirmedFailureNoMutation)
+    );
+    // `Failed` is itself terminal, so a real restart short-circuits to
+    // `AlreadyTerminal` before `classify()` is ever consulted -- the
+    // classifier's own `ConfirmedFailureNoMutation -> SafeToResume` mapping
+    // (unaffected by the dispatch-marker extension) is covered directly by
+    // `transaction_recovery_contract.rs`'s
+    // `safe_to_resume_when_apply_confirmed_failure_no_mutation`. This test's
+    // job is only to prove the real, wired `engine::apply` path still
+    // durably persists that same outcome unmodified.
 
     std::fs::remove_dir_all(&dir).ok();
 }

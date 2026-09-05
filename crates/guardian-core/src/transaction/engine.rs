@@ -352,6 +352,16 @@ pub fn apply<P: MutableCapabilityAdapter>(
             ApplyOutcome::PartialOrUncertainMutation | ApplyOutcome::ResponseLostOrUnknown => {
                 return Err(EngineError::MustObserveBeforeRetry);
             }
+            // Defense in depth (G4 handoff §19.1a): a `NotRecorded` outcome
+            // with the dispatch marker already set means a prior attempt's
+            // provider call may have escaped before its outcome was
+            // durably recorded. `recovery::classify` must never route such
+            // a record back into `apply` as `SafeToResume` in the first
+            // place -- but `apply` itself never trusts that alone and
+            // refuses to re-invoke the provider here too.
+            ApplyOutcome::NotRecorded if existing.dispatch_marker => {
+                return Err(EngineError::MustObserveBeforeRetry);
+            }
             ApplyOutcome::NotRecorded => {}
         }
     } else {
@@ -365,6 +375,24 @@ pub fn apply<P: MutableCapabilityAdapter>(
     // real durability barrier inside `persist` itself, executed *before*
     // the provider is ever invoked. Persistence failure here means the
     // provider MUST NOT be called.
+    persist(
+        persist_dir,
+        &PersistedTransactionRecord::from_record(record),
+    )
+    .map_err(|error| EngineError::PersistenceFailed(error.to_string()))?;
+
+    // Durable dispatch-start marker (§19.1a, disclosed Wave-1-required G4
+    // extension): persisted, with the same real durability barrier, in the
+    // narrow window strictly between Apply-intent and the provider call
+    // itself. This is what lets recovery distinguish "provider dispatch
+    // definitely not entered" (no marker) from "provider dispatch entered,
+    // outcome not yet durably known" (marker set, outcome still
+    // `NotRecorded`) -- both of which otherwise look identical on reload.
+    // Persistence failure here means the provider MUST NOT be called,
+    // exactly like the Apply-intent persist above.
+    if let Some(apply_record) = record.apply_record.as_mut() {
+        apply_record.dispatch_marker = true;
+    }
     persist(
         persist_dir,
         &PersistedTransactionRecord::from_record(record),

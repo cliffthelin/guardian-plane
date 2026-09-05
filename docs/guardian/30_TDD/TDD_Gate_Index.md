@@ -24,6 +24,19 @@ This page is a navigation layer over the governing [Phase 0/1 TDD Contract](GUAR
 | G8 | Initial providers — **PASS, tagged `phase0-g8-initial-providers`** | [Platform Index](../10_Platform/INDEX.md) | [Implementation](GUARDIAN_G8_IMPLEMENTATION_HANDOFF.md), [Independent review](GUARDIAN_G8_INDEPENDENT_REVIEW_HANDOFF.md), [Milestone](../../evidence/g8/G8_MILESTONE.md) |
 | G9 | Clients & packaging — **PASS, tagged `phase0-g9-clients-packaging`** | [Client Surfaces](../20_Control_Plane/Client_Surfaces.md), [ADR-006](../../adr/ADR-006-guardian-indicator-mechanism.md), [ADR-007](../../adr/ADR-007-guardian-gui-tui-client-separation.md), [ADR-008](../../adr/ADR-008-guardian-package-filesystem-layout.md) | [Implementation](GUARDIAN_G9_IMPLEMENTATION_HANDOFF.md), [Independent review](GUARDIAN_G9_INDEPENDENT_REVIEW_HANDOFF.md), [Milestone](../../evidence/g9/G9_MILESTONE.md) |
 
+## Wave 1 — separately governed interstitial stage (not a numbered gate, not TDD-contract Phase 2)
+
+Wave 1 was introduced by §50 of the TDD contract after G0–G9 closed, as a
+distinct, unnumbered interstitial stage — it does not consume the `G10`
+slot and is not TDD-contract Phase 2 (§47's own read-only observability/
+correlation expansion, which remains separate, distinct, and not started
+by Wave 1). See §50's own disambiguation rule for the full governing
+terminology.
+
+| Stage | Purpose | Governing amendment | Handoffs |
+|---|---|---|---|
+| Wave 1 | First production mutation (systemd `cups-restart`) — **PASS, tagged `wave1-first-production-mutation`** | [TDD contract §50](GUARDIAN_PHASE_0_1_TDD_CONTRACT.md) | [Implementation](GUARDIAN_WAVE1_IMPLEMENTATION_HANDOFF.md), [Independent review](GUARDIAN_WAVE1_INDEPENDENT_REVIEW_HANDOFF.md), [Milestone](../../evidence/wave1/WAVE1_MILESTONE.md) |
+
 ## Rule
 
 Do not duplicate detailed acceptance criteria here. The TDD contract is authoritative; this page exists so a coding agent can navigate from a gate to the relevant concepts and external provider sources.

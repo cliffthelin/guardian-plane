@@ -368,6 +368,19 @@ impl ProviderAuthorizationRequest {
 }
 ```
 
+**Correction (repair pass; runtime capture is authoritative — see §12's
+`W1-AUTH-007` correction note below for the full evidence)**: this worked
+example's `polkit.message` line — interpolating `capability.unit_name()`
+via `format!`, following this section's own `$(unit)`-literal wire
+capture above *inconsistently* — was wrong. A fresh runtime re-capture
+established that real systemd never interpolates this field; the wire
+value is always the literal, unsubstituted `"Authentication is required
+to restart '$(unit)'."`. The shipped implementation constructs
+`"polkit.message"` as that fixed literal string, not via `format!` with
+the unit name. This is a correction to this worked example only —
+`unit`, `verb`, and `polkit.gettext_domain` (all still correctly
+interpolated/fixed here) are unaffected.
+
 (exact Rust naming/shape is not binding; the semantics are — `capability`
 is the already-validated `RestartCapability` row, resolved *before* this
 request is ever constructed, per §6's ordering, so nothing caller-
@@ -482,6 +495,29 @@ unmodified classifier gives that specific point `StateAmbiguous` via
 | Observe determined `PostconditionNotMet` | — | `MustRollback` | The only real compensating action (§6's `BestEffort` retry) applies. |
 | Crash during `RollingBack` | — | `MustRollback` | Unmodified `recovery.rs` mapping — restart from the top of rollback, not assumed complete. |
 | The `BestEffort` compensating restart itself fails | — | terminal `RollbackFailed` state → `RequiresHumanRecovery` on any later recovery pass | See §12's `W1-REC-008` — mirrors `GuardedWrite`'s own already-accepted `RollbackFailed` fixture coverage exactly; no new G4 state or classification is introduced. |
+
+**Correction (repair pass, governed G4 extension — see TDD contract §50.x
+"G4 extension: durable Apply-dispatch marker")**: the row above for the
+in-flight-`RestartUnit` crash point states the *required* classification
+(`PartialOrUncertainMutation` → `StateAmbiguous`) but this handoff's
+original implementation pass found, with real VM evidence
+(`docs/evidence/wave1/wave1_vm005_finding.md`), that the **unmodified**
+`engine.rs`/`recovery.rs` could not actually reach it: a real `kill -9`
+strictly during the in-flight D-Bus call left only
+`ApplyOutcome::NotRecorded` durable (identical to the row above it),
+which `classify_applying` maps to `SafeToResume` — an unsafe automatic
+replay, not the `StateAmbiguous` this row requires. The project owner
+adjudicated this conflict: do not weaken this row's requirement; instead
+extend G4 with the minimum durable metadata needed to distinguish the two
+cases — a durable "dispatch marker", persisted immediately before
+`provider.apply` is invoked (a new, disclosed, narrow addition to the
+*unmodified-G4* premise stated throughout this handoff, not a Wave-1-
+local hack; see TDD contract §50.x for the full governance record). With
+that extension, `NotRecorded` + marker set now correctly reaches
+`StateAmbiguous`, and this row's requirement is met — re-verified with
+fresh real VM evidence (`docs/evidence/wave1/wave1_vm005_finding.md`'s own
+"Resolution" section). Every other row in this table, and the classifier
+behavior it depends on, is unaffected.
 
 **Apply idempotent?** Yes — systemd merges/queues concurrent restart jobs
 for the same unit rather than double-restarting (to be confirmed
@@ -623,7 +659,10 @@ capability_id: "cups-restart"
        details:
          unit                  = "cups.service"
          verb                  = "restart"
-         polkit.message        = "Authentication is required to restart 'cups.service'."
+         polkit.message        = "Authentication is required to restart '$(unit)'."
+           [corrected -- repair pass: real systemd sends the literal,
+           unsubstituted "$(unit)" template, not "cups.service"
+           interpolated; see §12's W1-AUTH-007 correction note]
          polkit.gettext_domain = "systemd"
 ```
 
@@ -726,7 +765,9 @@ W1-AUTH-007 — Guardian's mediated provider-policy authorization request
               org.freedesktop.systemd1.manage-units and the request's
               details() returns exactly the four evidenced fields — unit
               = "cups.service", verb = "restart", polkit.message =
-              "Authentication is required to restart 'cups.service'.",
+              "Authentication is required to restart '$(unit)'."
+              [corrected -- repair pass, see note below; this section
+              previously read "cups.service" interpolated],
               polkit.gettext_domain = "systemd" — matching the real
               systemd request observed on the D-Bus wire in VM evidence
               (§13/W1-VM-007). Source-level, mechanically checkable: (a)
@@ -738,6 +779,29 @@ W1-AUTH-007 — Guardian's mediated provider-policy authorization request
               arbitrary detail insertion is possible (no `HashMap`
               parameter reachable from outside authorization.rs's own
               construction of the request).
+
+              **Correction (repair pass, governed decision: runtime
+              capture is authoritative)**: this ID's original text (and
+              §7's/§10's worked examples above) recorded `polkit.message`
+              as the unit name interpolated into the template
+              (`"...restart 'cups.service'."`). The original
+              implementation pass's own fresh VM re-capture
+              (`docs/evidence/wave1/checkauth-comparison.md`) established
+              that real Ubuntu 26.04.1 systemd never interpolates this
+              field on the wire — it sends the literal, unsubstituted
+              template `"Authentication is required to restart
+              '$(unit)'."`; substitution is a presentation-layer behavior
+              of the polkit authentication-agent UI, not something the
+              `CheckAuthorization` caller (systemd) performs. The project
+              owner adjudicated: Guardian's `ProviderAuthorizationRequest`
+              must reproduce the literal template, not pre-interpolate
+              it — implemented in
+              `crates/guardian-core/src/authorization.rs`, re-verified
+              with fresh native-vs-mediated real VM evidence showing exact
+              semantic equality across every field
+              (`docs/evidence/wave1/checkauth-comparison.md`'s
+              "Resolution" section). `unit`, `verb`, and
+              `polkit.gettext_domain` are unaffected by this correction.
 W1-TXN-001 — guardian-daemon never calls RestartUnit, and never performs
              the mediated authorize_provider_request check; only
              guardian-helper does (source-level, mechanically checkable).

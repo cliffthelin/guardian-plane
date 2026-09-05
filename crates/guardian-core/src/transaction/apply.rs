@@ -56,6 +56,23 @@ impl std::str::FromStr for ApplyOutcome {
 /// *before* the provider is ever invoked (G4 handoff §19.1 step 2) --
 /// `outcome` is the separate **Apply-outcome** fact, persisted only after
 /// the provider call and its result are known (step 5).
+///
+/// `dispatch_marker` is a third, narrower durable fact sitting strictly
+/// between those two (G4 handoff §19.1a, added as a disclosed Wave-1-
+/// required extension to G4 -- see `docs/guardian/30_TDD/
+/// GUARDIAN_PHASE_0_1_TDD_CONTRACT.md` §50.x). Apply-intent alone cannot
+/// distinguish "the provider was never invoked" from "the provider was
+/// invoked and its outcome is not yet durably known" -- both look like
+/// `outcome == NotRecorded` on reload. `dispatch_marker` is persisted,
+/// durably, immediately before `provider.apply` is called (and only ever
+/// after Apply-intent is already durable), so a crash strictly between
+/// intent and dispatch still reads as `NotRecorded` + no marker (safe to
+/// resume, unchanged), while a crash during or immediately after the
+/// provider call -- before the concrete `ApplyOutcome` is persisted --
+/// reads as `NotRecorded` + marker set, which recovery
+/// ([`crate::transaction::recovery::classify`]) must treat as
+/// [`crate::transaction::recovery::RecoveryClassification::StateAmbiguous`],
+/// never `SafeToResume`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApplyRecord {
     pub idempotency_key: String,
@@ -64,6 +81,10 @@ pub struct ApplyRecord {
     /// behavior across a simulated crash/restart.
     pub attempt_started_at: u64,
     pub outcome: ApplyOutcome,
+    /// `true` once the durable dispatch-start marker has been persisted for
+    /// this attempt (i.e. the provider call is about to be, or has been,
+    /// invoked). See the type-level doc comment above.
+    pub dispatch_marker: bool,
 }
 
 impl ApplyRecord {
@@ -73,6 +94,7 @@ impl ApplyRecord {
             idempotency_key,
             attempt_started_at,
             outcome: ApplyOutcome::NotRecorded,
+            dispatch_marker: false,
         }
     }
 }

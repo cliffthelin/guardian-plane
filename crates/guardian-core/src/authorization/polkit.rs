@@ -14,8 +14,9 @@ use zbus::zvariant::Value;
 
 use super::{
     AuthorizationError, AuthorizationOutcome, AuthorizationRequest, AuthorizationUnavailableReason,
-    Authorizer,
+    Authorizer, ProviderAuthorizationRequest, ProviderAuthorizer,
 };
+use crate::identity::CallerIdentity;
 
 const ALLOW_USER_INTERACTION: u32 = 0x01;
 
@@ -51,10 +52,25 @@ impl<'c> PolkitAuthorizer<'c> {
     }
 }
 
-impl Authorizer for PolkitAuthorizer<'_> {
-    async fn authorize(
+impl PolkitAuthorizer<'_> {
+    /// Private, low-level `CheckAuthorization` transport shared by both
+    /// public entry points ([`Authorizer::authorize`] and
+    /// [`ProviderAuthorizer::authorize_provider_request`]). This is
+    /// deliberately **not** part of this module's public API — it is not a
+    /// trusted callable boundary and must never become one: both callers
+    /// above construct `action_id`/`details` entirely from their own closed,
+    /// typed inputs (a fixed [`crate::authorization::PolkitAction`]
+    /// action-id constant with an empty map, or
+    /// [`ProviderAuthorizationRequest`]'s own internally-derived action
+    /// id/details) before this function ever sees them — nothing here
+    /// accepts a caller-supplied action id or detail map from outside this
+    /// module (handoff §7/§10).
+    async fn check_authorization_raw(
         &self,
-        request: &AuthorizationRequest,
+        subject: &CallerIdentity,
+        action_id: &str,
+        details: HashMap<&str, &str>,
+        interactive: bool,
     ) -> Result<AuthorizationOutcome, AuthorizationError> {
         // Failing to even construct the proxy means Guardian cannot reach
         // the polkit authority at all — an infrastructure failure, never an
@@ -68,8 +84,8 @@ impl Authorizer for PolkitAuthorizer<'_> {
             })?;
 
         let mut subject_details = HashMap::new();
-        subject_details.insert("name", Value::from(request.subject().unique_name()));
-        let flags = if request.interactive() {
+        subject_details.insert("name", Value::from(subject.unique_name()));
+        let flags = if interactive {
             ALLOW_USER_INTERACTION
         } else {
             0
@@ -78,8 +94,8 @@ impl Authorizer for PolkitAuthorizer<'_> {
         let result = proxy
             .check_authorization(
                 ("system-bus-name", subject_details),
-                request.action().action_id(),
-                HashMap::new(),
+                action_id,
+                details,
                 flags,
                 "",
             )
@@ -102,11 +118,9 @@ impl Authorizer for PolkitAuthorizer<'_> {
         // infrastructure error, never to `AuthenticationUnavailable`.
         match result {
             Ok((true, _, _)) => Ok(AuthorizationOutcome::Authorized),
-            Ok((false, true, _)) if !request.interactive() => {
-                Ok(AuthorizationOutcome::Unavailable(
-                    AuthorizationUnavailableReason::InteractionRequiredButDisallowed,
-                ))
-            }
+            Ok((false, true, _)) if !interactive => Ok(AuthorizationOutcome::Unavailable(
+                AuthorizationUnavailableReason::InteractionRequiredButDisallowed,
+            )),
             Ok((false, true, _)) => Ok(AuthorizationOutcome::Unavailable(
                 AuthorizationUnavailableReason::NoAuthenticationAgent,
             )),
@@ -115,5 +129,39 @@ impl Authorizer for PolkitAuthorizer<'_> {
                 "CheckAuthorization failed: {error}"
             ))),
         }
+    }
+}
+
+impl Authorizer for PolkitAuthorizer<'_> {
+    async fn authorize(
+        &self,
+        request: &AuthorizationRequest,
+    ) -> Result<AuthorizationOutcome, AuthorizationError> {
+        // Every existing `PolkitAction` call site keeps its current
+        // empty-details behavior, unchanged (handoff §7/§10).
+        self.check_authorization_raw(
+            request.subject(),
+            request.action().action_id(),
+            HashMap::new(),
+            request.interactive(),
+        )
+        .await
+    }
+}
+
+impl ProviderAuthorizer for PolkitAuthorizer<'_> {
+    async fn authorize_provider_request(
+        &self,
+        subject: &CallerIdentity,
+        request: &ProviderAuthorizationRequest,
+        interactive: bool,
+    ) -> Result<AuthorizationOutcome, AuthorizationError> {
+        let owned_details = request.details();
+        let details: HashMap<&str, &str> = owned_details
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
+        self.check_authorization_raw(subject, request.action_id(), details, interactive)
+            .await
     }
 }

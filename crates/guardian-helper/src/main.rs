@@ -22,15 +22,19 @@
 //! records the resulting terminal state, using only G4's own existing,
 //! unmodified engine/persistence functions. See [`resolve_recovered`].
 
+mod restart_capability;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use guardian_core::arbitration::{CandidateProvider, RollbackKind};
-use guardian_core::authorization::PolkitAction;
 use guardian_core::authorization::polkit::PolkitAuthorizer;
+use guardian_core::authorization::{
+    PolkitAction, ProviderAuthorizationRequest, ProviderAuthorizer,
+};
 use guardian_core::error::{GuardianDbusError, GuardianErrorCategory};
-use guardian_core::identity::resolve_caller_identity;
+use guardian_core::identity::{CallerIdentity, resolve_caller_identity};
 use guardian_core::risk::Risk;
 use guardian_core::transaction::persistence::{PersistedTransactionRecord, persist};
 use guardian_core::transaction::recovery::{self, RecoveryClassification};
@@ -45,6 +49,7 @@ use guardian_provider_api::{
     ObservationOutcome as RawObservationOutcome, PrivilegeRequirement, ProviderId,
     RollbackOutcome as RawRollbackOutcome, StateSnapshot, Unsupported,
 };
+use restart_capability::SystemdRestartAdapter;
 
 const WELL_KNOWN_NAME: &str = "io.github.cliffthelin.GuardianHelper1";
 const OBJECT_PATH: &str = "/io/github/cliffthelin/GuardianHelper1";
@@ -411,6 +416,481 @@ async fn run_guarded_write(
     Ok(adapter.read())
 }
 
+// ---------------------------------------------------------------------------
+// Wave 1 -- `cups-restart` (TDD contract §50;
+// `GUARDIAN_WAVE1_IMPLEMENTATION_HANDOFF.md`, fully normative)
+// ---------------------------------------------------------------------------
+
+fn restart_provider_id() -> ProviderId {
+    ProviderId::new(restart_capability::PROVIDER_ID).expect("fixed literal is a valid ProviderId")
+}
+
+fn restart_capability_id(capability_id: &str) -> Result<CapabilityId, GuardianDbusError> {
+    CapabilityId::new(capability_id)
+        .map_err(|error| GuardianErrorCategory::PreconditionFailed.with_message(error.to_string()))
+}
+
+fn restart_capability_record(capability_id: &CapabilityId) -> CapabilityRecord {
+    CapabilityRecord {
+        capability_id: capability_id.clone(),
+        provider_id: restart_provider_id(),
+        provider_version: None,
+        availability: Availability::Available,
+        health: Health::Healthy,
+        read_support: true,
+        write_support: true,
+        // Provider-owned: systemd's own real `manage-units` policy is
+        // authoritative (handoff §7) -- this is a control-plane
+        // classification only, never itself proof of caller authorization
+        // (`arbitration.rs`'s own documented boundary).
+        authorization_ownership: Knowledge::Known(
+            guardian_provider_api::AuthorizationMode::ProviderOwnedAuthorization,
+        ),
+        privilege_requirement: PrivilegeRequirement::RootOrSystemPrivilege,
+        boot_availability: BootAvailabilitySet::new(),
+        interface_kind: InterfaceKind::DBus,
+        interface_name: Some(WELL_KNOWN_NAME.to_owned()),
+        interface_hash: None,
+        diagnostic_cost: DiagnosticCost {
+            io_write_cost: CostLevel::Negligible,
+            ..DiagnosticCost::default()
+        },
+        last_observed_at: "0".to_owned(),
+    }
+}
+
+/// Wave 1's arbitration source (§9): systemd itself is the authoritative
+/// external controller, and Guardian is a requester of its action, never a
+/// competing writer -- `guardian_owned_writer: false` maps directly onto
+/// the existing, unmodified `Ownership::ProviderOwnedWriter(ProviderId)`
+/// (no new arbitration variant, per §9's own conclusion).
+struct RestartArbitrationSource;
+
+impl ArbitrationStateSource for RestartArbitrationSource {
+    fn current_revision(&self, _capability_id: &CapabilityId) -> u64 {
+        1
+    }
+
+    fn current_candidates(&self, _capability_id: &CapabilityId) -> Vec<CandidateProvider> {
+        vec![CandidateProvider {
+            provider_id: restart_provider_id(),
+            priority: 0,
+            healthy: true,
+            wants_write: true,
+            guardian_owned_writer: false,
+            authorization_ownership: Knowledge::Known(
+                guardian_provider_api::AuthorizationMode::ProviderOwnedAuthorization,
+            ),
+            rollback_kind: RollbackKind::BestEffort,
+        }]
+    }
+}
+
+/// The `Validate` step for Wave 1's `cups-restart` (handoff §6's Validate
+/// row): domain-specific live precondition checks (`LoadState !=
+/// "not-found"`, not masked, `RefuseManualStart`/`Stop` not set — W1-MUT-
+/// 003/004) run first, using a live [`SystemdRestartAdapter::read_live_state`]
+/// read guardian-helper never trusts from `guardian-daemon`, followed by
+/// the same generic capability/arbitration checks the unmodified
+/// `txn::engine::validate` free function would perform. Both sets of
+/// checks run inside the one `Validating` window
+/// `TransactionRecord::transition_to`'s legal-transition graph allows
+/// (`Created -> Validating -> Validated | Rejected`) — `engine::validate`
+/// itself is not called directly here only because it unconditionally
+/// attempts its own `Created -> Validating` transition, which would be
+/// illegal from a record already inside that window; this sequences the
+/// *order* of two already-existing checks, it does not reimplement either.
+fn restart_validate(
+    record: &mut TransactionRecord,
+    adapter: &SystemdRestartAdapter,
+    capability: &guardian_core::authorization::RestartCapability,
+    capability_record: &CapabilityRecord,
+    source: &RestartArbitrationSource,
+) -> Result<(), GuardianDbusError> {
+    record
+        .transition_to(TransactionState::Validating)
+        .map_err(|error| GuardianErrorCategory::Internal.with_message(error.to_string()))?;
+
+    let live_state = adapter.read_live_state().map_err(|error| {
+        // A precondition check that cannot even be performed is a real
+        // provider-availability problem -- the record never reaches
+        // Rejected for this case, since Guardian could not evaluate the
+        // precondition at all (distinct from evaluating it and finding it
+        // false).
+        GuardianErrorCategory::ProviderUnavailable.with_message(error.0)
+    })?;
+
+    if live_state.is_load_state_blocked() {
+        record.validation_results = Some(txn::ValidationOutcome::Failed(format!(
+            "unit load_state is {}",
+            live_state.load_state
+        )));
+        record
+            .transition_to(TransactionState::Rejected)
+            .map_err(|error| GuardianErrorCategory::Internal.with_message(error.to_string()))?;
+        return Err(
+            GuardianErrorCategory::PreconditionFailed.with_message(format!(
+                "unit {} is {} (W1-MUT-003)",
+                capability.unit_name(),
+                live_state.load_state
+            )),
+        );
+    }
+    if live_state.refuses_manual_start_or_stop() {
+        record.validation_results = Some(txn::ValidationOutcome::Failed(
+            "unit refuses manual start/stop".to_owned(),
+        ));
+        record
+            .transition_to(TransactionState::Rejected)
+            .map_err(|error| GuardianErrorCategory::Internal.with_message(error.to_string()))?;
+        return Err(GuardianErrorCategory::Unsupported.with_message(format!(
+            "unit {} has RefuseManualStart/RefuseManualStop set (W1-MUT-004)",
+            capability.unit_name()
+        )));
+    }
+
+    if capability_record.availability == Availability::Unavailable {
+        record.validation_results = Some(txn::ValidationOutcome::Failed(
+            "capability is unavailable".to_owned(),
+        ));
+        record
+            .transition_to(TransactionState::Rejected)
+            .map_err(|error| GuardianErrorCategory::Internal.with_message(error.to_string()))?;
+        return Err(
+            GuardianErrorCategory::PreconditionFailed.with_message("capability unavailable")
+        );
+    }
+    let decision =
+        guardian_core::arbitration::arbitrate(&guardian_core::arbitration::ArbitrationInput {
+            capability_id: record.capability_id.clone(),
+            candidates: source.current_candidates(&record.capability_id),
+            write_requested: true,
+            risk_class: record.risk_class,
+            revision: source.current_revision(&record.capability_id),
+            external_writer_present: false,
+        });
+    if !decision.write_permitted {
+        record.validation_results = Some(txn::ValidationOutcome::Failed(
+            decision.decision_reason.clone(),
+        ));
+        record
+            .transition_to(TransactionState::Rejected)
+            .map_err(|error| GuardianErrorCategory::Internal.with_message(error.to_string()))?;
+        return Err(
+            GuardianErrorCategory::PreconditionFailed.with_message(decision.decision_reason)
+        );
+    }
+    record.arbitration_result = Some(decision);
+    record.validation_results = Some(txn::ValidationOutcome::Passed);
+    record
+        .transition_to(TransactionState::Validated)
+        .map_err(|error| GuardianErrorCategory::Internal.with_message(error.to_string()))?;
+    Ok(())
+}
+
+/// The `Authorize` step (handoff §7, corrected four times): guardian-helper
+/// mediates systemd's own real, already-shipped `manage-units` policy for
+/// the real, resolved caller -- never a Guardian-owned `PolkitAction`
+/// substitute (W1-AUTH-001/005/006/007). Mirrors `txn::engine::authorize`'s
+/// own transition/error-mapping discipline exactly, but through
+/// `authorize_provider_request` instead, since `engine::authorize` is typed
+/// to `PolkitAction` and cannot express a `ProviderAuthorizationRequest`
+/// (§7/§10 — `authorization.rs`'s own disclosed addition, not a change to
+/// the unmodified G4 engine).
+async fn restart_authorize(
+    record: &mut TransactionRecord,
+    connection: &zbus::Connection,
+    subject: &CallerIdentity,
+    capability: guardian_core::authorization::RestartCapability,
+    interactive: bool,
+) -> Result<(), GuardianDbusError> {
+    let authorizer = PolkitAuthorizer::new(connection);
+    let request = ProviderAuthorizationRequest::SystemdRestart { capability };
+    record
+        .transition_to(TransactionState::Authorizing)
+        .map_err(|error| GuardianErrorCategory::Internal.with_message(error.to_string()))?;
+    match authorizer
+        .authorize_provider_request(subject, &request, interactive)
+        .await
+    {
+        Ok(guardian_core::authorization::AuthorizationOutcome::Authorized) => {
+            record.authorization_outcome =
+                Some(guardian_core::authorization::AuthorizationOutcome::Authorized);
+            record
+                .transition_to(TransactionState::Authorized)
+                .map_err(|error| GuardianErrorCategory::Internal.with_message(error.to_string()))?;
+            Ok(())
+        }
+        Ok(other) => {
+            record.authorization_outcome = Some(other);
+            record
+                .transition_to(TransactionState::Rejected)
+                .map_err(|error| GuardianErrorCategory::Internal.with_message(error.to_string()))?;
+            Err(other
+                .into_provider_dbus_error(&request)
+                .unwrap_or_else(|| GuardianErrorCategory::NotAuthorized.with_message("denied")))
+        }
+        Err(error) => {
+            record.authorization_error = Some(format!("{error:?}"));
+            record
+                .transition_to(TransactionState::Rejected)
+                .map_err(|error| GuardianErrorCategory::Internal.with_message(error.to_string()))?;
+            Err(error.into_dbus_error())
+        }
+    }
+}
+
+/// The one bounded, capability-ID-selected mutation this handoff
+/// authorizes (§10). `capability_id` is resolved against
+/// [`restart_capability::resolve_capability`]'s fixed table *before*
+/// anything else — an unknown id is rejected here, before a
+/// `TransactionRecord` is even created and before any unit name is looked
+/// up (W1-MUT-002).
+///
+/// # Errors
+///
+/// See the module-level mapping in [`Self`]'s caller
+/// (`GuardianHelper::restart_capability`) — every branch below maps onto
+/// one of G1's existing 17 [`GuardianErrorCategory`] variants (handoff
+/// §11); no new category is introduced.
+async fn run_restart_capability(
+    connection: &zbus::Connection,
+    state: &Path,
+    subject: CallerIdentity,
+    capability_id_str: &str,
+    interactive: bool,
+) -> Result<String, GuardianDbusError> {
+    // W1-MUT-002: unknown capability_id rejected before any unit name is
+    // looked up and before Authorize is ever reached -- no transaction
+    // record is even created for this case.
+    let Some(capability) = restart_capability::resolve_capability(capability_id_str) else {
+        return Err(GuardianErrorCategory::PreconditionFailed
+            .with_message(format!("unknown capability_id: {capability_id_str}")));
+    };
+    let capability_id = restart_capability_id(capability_id_str)?;
+    let provider_id = restart_provider_id();
+    let clock = now_secs();
+
+    let adapter =
+        SystemdRestartAdapter::new(capability.unit_name().to_owned()).map_err(|error| {
+            GuardianErrorCategory::ProviderUnavailable
+                .with_message(format!("systemd1 unreachable: {error}"))
+        })?;
+    let source = RestartArbitrationSource;
+    let capability_record = restart_capability_record(&capability_id);
+
+    let transaction_id = TransactionId::generate();
+    let mut record = TransactionRecord {
+        idempotency_key: transaction_id.to_string(),
+        transaction_id: transaction_id.clone(),
+        action_type: ActionType::BoundedWrite,
+        risk_class: Risk::Moderate,
+        initiating_bus_name: Some(subject.unique_name().to_owned()),
+        initiating_session: None,
+        provider_id,
+        capability_id,
+        created_at: clock,
+        deadline: None,
+        state: TransactionState::Created,
+        pre_state: None,
+        validation_results: None,
+        arbitration_result: None,
+        authorization_outcome: None,
+        authorization_error: None,
+        requested_change: ActionRequest("restart".to_owned()),
+        provider_request: None,
+        provider_response: None,
+        observation_policy: None,
+        observations: Vec::new(),
+        apply_record: None,
+        commit_result: None,
+        rollback_result: None,
+        incident_ids: Vec::new(),
+        cancellation_requested: false,
+        deadline_expired: false,
+    };
+
+    restart_validate(
+        &mut record,
+        &adapter,
+        &capability,
+        &capability_record,
+        &source,
+    )?;
+
+    // Snapshot (§6's note: informational-only guardian-daemon read is not
+    // trusted here -- this is guardian-helper's own live capture via the
+    // real adapter, feeding the unmodified G4 engine's own Snapshot step).
+    txn::engine::snapshot(&mut record, &adapter, &source, clock).map_err(|error| {
+        GuardianErrorCategory::PersistenceFailed.with_message(format!("snapshot: {error}"))
+    })?;
+
+    restart_authorize(&mut record, connection, &subject, capability, interactive).await?;
+
+    let apply_dir = transactions_dir(state);
+    txn::engine::apply(&mut record, &adapter, &source, &apply_dir, clock)
+        .map_err(|error| GuardianErrorCategory::ApplyFailed.with_message(format!("{error}")))?;
+    if record.state == TransactionState::Failed {
+        return Err(GuardianErrorCategory::ProviderUnavailable
+            .with_message("RestartUnit did not complete (W1-TXN-002)"));
+    }
+
+    restart_observe_then_resolve(&mut record, &adapter, &apply_dir)?;
+
+    Ok(transaction_id.to_string())
+}
+
+/// The Wave 1 counterpart to [`observe_then_resolve`] — identical
+/// discipline (Observe, then Confirm on `PostconditionMet` or the
+/// `BestEffort` compensating restart otherwise), reused verbatim in spirit
+/// rather than by generic parametrization, since [`CounterAdapter`] and
+/// [`SystemdRestartAdapter`] are distinct concrete types and the unmodified
+/// G4 engine's functions are already generic over `MutableCapabilityAdapter`
+/// — this wrapper exists only so each capability family's own top-level
+/// error mapping stays distinct (`ObservationFailed`/`RollbackFailed`,
+/// unchanged from G1's taxonomy either way).
+fn restart_observe_then_resolve(
+    record: &mut TransactionRecord,
+    adapter: &SystemdRestartAdapter,
+    dir: &Path,
+) -> Result<(), GuardianDbusError> {
+    let observation = txn::engine::observe(record, adapter).map_err(|error| {
+        GuardianErrorCategory::ObservationFailed.with_message(format!("{error}"))
+    })?;
+    persist_now(record, dir);
+
+    if observation == ObservationOutcome::PostconditionMet {
+        txn::engine::confirm(record).map_err(|error| {
+            GuardianErrorCategory::ObservationFailed.with_message(format!("{error}"))
+        })?;
+        persist_now(record, dir);
+        Ok(())
+    } else {
+        // W1-REC-007: PostconditionNotMet triggers the BestEffort
+        // compensating restart, disclosed as such, never presented as a
+        // true rollback.
+        txn::engine::rollback(record, adapter, RollbackKind::BestEffort).map_err(|error| {
+            GuardianErrorCategory::RollbackFailed.with_message(format!("{error}"))
+        })?;
+        persist_now(record, dir);
+        if record.state == TransactionState::RollbackFailed {
+            // W1-REC-008: never claim RolledBack; surface RollbackFailed
+            // honestly.
+            return Err(GuardianErrorCategory::RollbackFailed
+                .with_message("compensating restart itself failed (W1-REC-008)"));
+        }
+        if observation == ObservationOutcome::PostconditionNotMet {
+            Err(GuardianErrorCategory::ObservationFailed
+                .with_message("postcondition not met; compensating restart attempted"))
+        } else {
+            Err(GuardianErrorCategory::ObservationFailed
+                .with_message("observation ambiguous; compensating restart attempted"))
+        }
+    }
+}
+
+/// Startup recovery for a persisted Wave 1 `cups-restart` transaction —
+/// same discipline as [`resolve_recovered`], reusing the identical
+/// unmodified `recovery::classify` classifier and G4 engine functions, but
+/// against a real [`SystemdRestartAdapter`] rather than the fixture
+/// [`CounterAdapter`]. See that function's doc comment for the full
+/// `SafeToResume` authorization invariant this mirrors.
+fn resolve_recovered_restart(
+    persisted: &PersistedTransactionRecord,
+    state: &Path,
+) -> Result<RecoveryOutcome, String> {
+    let Some(capability) = restart_capability::resolve_capability(persisted.capability_id.as_str())
+    else {
+        return Err(format!(
+            "transaction {} has an unresolvable capability_id {} — requires human recovery",
+            persisted.transaction_id, persisted.capability_id
+        ));
+    };
+    let adapter = SystemdRestartAdapter::new(capability.unit_name().to_owned())
+        .map_err(|error| format!("systemd1 unreachable during recovery: {error}"))?;
+    let source = RestartArbitrationSource;
+    let dir = transactions_dir(state);
+
+    if persisted.state.is_terminal() && persisted.state != TransactionState::RollbackFailed {
+        return Ok(RecoveryOutcome::AlreadyTerminal);
+    }
+
+    let classification = recovery::classify(persisted.to_recovery_snapshot());
+    let mut record = reconstruct_for_resume_restart(persisted);
+
+    match classification {
+        RecoveryClassification::AlreadyCommitted => Ok(RecoveryOutcome::NoActionNeeded),
+
+        RecoveryClassification::SafeToResume => {
+            txn::engine::snapshot(&mut record, &adapter, &source, now_secs())
+                .map_err(|error| format!("resume snapshot failed: {error}"))?;
+            let apply_dir = dir.clone();
+            txn::engine::apply(&mut record, &adapter, &source, &apply_dir, now_secs())
+                .map_err(|error| format!("resume apply failed: {error}"))?;
+            persist_now(&record, &dir);
+            if record.state == TransactionState::Observing {
+                let _ = restart_observe_then_resolve(&mut record, &adapter, &dir);
+            }
+            finish_recovery(&record)
+        }
+
+        RecoveryClassification::MustObserve => {
+            let _ = restart_observe_then_resolve(&mut record, &adapter, &dir);
+            finish_recovery(&record)
+        }
+
+        RecoveryClassification::MustRollback | RecoveryClassification::StateAmbiguous => {
+            let _ = txn::engine::rollback(&mut record, &adapter, RollbackKind::BestEffort);
+            persist_now(&record, &dir);
+            finish_recovery(&record)
+        }
+
+        RecoveryClassification::RequiresHumanRecovery => Err(format!(
+            "transaction {} requires human recovery (state={:?}); left exactly as persisted",
+            persisted.transaction_id, persisted.state
+        )),
+    }
+}
+
+fn reconstruct_for_resume_restart(persisted: &PersistedTransactionRecord) -> TransactionRecord {
+    TransactionRecord {
+        transaction_id: persisted.transaction_id.clone(),
+        idempotency_key: persisted.idempotency_key.clone(),
+        action_type: ActionType::BoundedWrite,
+        risk_class: Risk::Moderate,
+        initiating_bus_name: None,
+        initiating_session: None,
+        provider_id: persisted.provider_id.clone(),
+        capability_id: persisted.capability_id.clone(),
+        created_at: now_secs(),
+        deadline: None,
+        state: persisted.state,
+        pre_state: None,
+        validation_results: None,
+        arbitration_result: None,
+        authorization_outcome: None,
+        authorization_error: None,
+        requested_change: ActionRequest("restart".to_owned()),
+        provider_request: None,
+        provider_response: None,
+        observation_policy: None,
+        observations: persisted.last_observation.into_iter().collect(),
+        apply_record: persisted.apply_outcome.map(|outcome| {
+            guardian_core::transaction::ApplyRecord {
+                idempotency_key: persisted.idempotency_key.clone(),
+                attempt_started_at: 0,
+                outcome,
+                dispatch_marker: persisted.dispatch_marker,
+            }
+        }),
+        commit_result: None,
+        rollback_result: persisted.rollback_result,
+        incident_ids: Vec::new(),
+        cancellation_requested: persisted.cancellation_requested,
+        deadline_expired: persisted.deadline_expired,
+    }
+}
+
 /// Reconstructs the minimal, honest `TransactionRecord` a recovery action
 /// is legally allowed to resume from — only the fields G4's bounded
 /// persistence contract actually captured (`PersistedTransactionRecord`),
@@ -450,7 +930,10 @@ async fn run_guarded_write(
 /// trigger) invalidates this recovery-authorization assumption and
 /// requires explicit security review before merging — the structural
 /// source-scan test
-/// `tests::exactly_two_apply_call_sites_and_the_client_facing_one_is_strictly_after_authorize`
+/// `tests::exactly_four_apply_call_sites_and_each_client_facing_one_is_strictly_after_its_own_authorize`
+/// (Wave 1's `run_restart_capability`/`resolve_recovered_restart` extend
+/// the same invariant for a second capability family — see that test's own
+/// doc comment)
 /// exists to make a future violation of this invariant visible in CI
 /// (Rust's type system cannot express "only this one call site may
 /// produce this value" directly, so this guard checks it the same way a
@@ -484,6 +967,7 @@ fn reconstruct_for_resume(persisted: &PersistedTransactionRecord) -> Transaction
                 idempotency_key: persisted.idempotency_key.clone(),
                 attempt_started_at: 0,
                 outcome,
+                dispatch_marker: persisted.dispatch_marker,
             }
         }),
         commit_result: None,
@@ -625,18 +1109,31 @@ fn recover_on_startup(state: &Path) {
     let dir = transactions_dir(state);
     for result in guardian_core::transaction::persistence::load_all(&dir) {
         match result {
-            Ok(persisted) => match resolve_recovered(&persisted, state) {
-                Ok(RecoveryOutcome::AlreadyTerminal | RecoveryOutcome::NoActionNeeded) => {}
-                Ok(RecoveryOutcome::Resumed(final_state)) => {
-                    eprintln!(
-                        "[guardian-helper] recovery: transaction_id={} resolved -> {final_state:?}",
-                        persisted.transaction_id
-                    );
+            Ok(persisted) => {
+                // Dispatch by provider_id: two capability families
+                // (G7's counter, Wave 1's cups-restart) share this
+                // process's one `transactions/` directory. Each is
+                // recovered via its own adapter, but through the same
+                // unmodified `recovery::classify` classifier and G4 engine
+                // functions either way.
+                let outcome = if persisted.provider_id.as_str() == restart_capability::PROVIDER_ID {
+                    resolve_recovered_restart(&persisted, state)
+                } else {
+                    resolve_recovered(&persisted, state)
+                };
+                match outcome {
+                    Ok(RecoveryOutcome::AlreadyTerminal | RecoveryOutcome::NoActionNeeded) => {}
+                    Ok(RecoveryOutcome::Resumed(final_state)) => {
+                        eprintln!(
+                            "[guardian-helper] recovery: transaction_id={} resolved -> {final_state:?}",
+                            persisted.transaction_id
+                        );
+                    }
+                    Err(message) => {
+                        eprintln!("[guardian-helper] recovery: {message}");
+                    }
                 }
-                Err(message) => {
-                    eprintln!("[guardian-helper] recovery: {message}");
-                }
-            },
+            }
             Err(error) => {
                 eprintln!("[guardian-helper] recovery: corrupt/unreadable record: {error:?}");
             }
@@ -679,11 +1176,47 @@ impl GuardianHelper {
     fn call_count(&self) -> u64 {
         *self.call_count.lock().unwrap()
     }
+
+    /// Wave 1's sole governed mutation (`GUARDIAN_WAVE1_IMPLEMENTATION_HANDOFF.md`
+    /// §10). `capability_id` and `interactive` are the *only* client-supplied
+    /// parameters — there is no field here for a systemd unit name, verb,
+    /// operation, provider method, polkit action id, or polkit detail
+    /// key/value (§16's forbidden-generic-broker list). Returns the real
+    /// transaction id, not the mutation's own result value — callers
+    /// observe the outcome via the transaction record, matching the
+    /// handoff's own method shape.
+    async fn restart_capability(
+        &self,
+        capability_id: String,
+        interactive: bool,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> Result<String, GuardianDbusError> {
+        let identity = resolve_caller_identity(connection, &header)
+            .await
+            .map_err(|error| GuardianErrorCategory::Internal.with_message(error.to_string()))?
+            .ok_or_else(|| {
+                GuardianErrorCategory::Internal.with_message("message carried no sender")
+            })?;
+        run_restart_capability(
+            connection,
+            &self.state,
+            identity,
+            &capability_id,
+            interactive,
+        )
+        .await
+    }
 }
 
 fn main() -> zbus::Result<()> {
     let state = state_dir();
     fs::create_dir_all(transactions_dir(&state)).expect("create helper state directory");
+
+    // Recovery runs before the serving connection claims the well-known
+    // name and starts accepting new requests. Wave 1's own adapter opens
+    // its own independent system-bus connection for any real systemd
+    // re-reads it needs (see `SystemdRestartAdapter::new`'s doc comment).
     recover_on_startup(&state);
 
     let helper = GuardianHelper {
@@ -797,6 +1330,20 @@ mod tests {
         state: TransactionState,
         apply_outcome: Option<ApplyOutcome>,
     ) -> TransactionId {
+        write_persisted_with_dispatch_marker(dir, state, apply_outcome, false)
+    }
+
+    /// Same as [`write_persisted`], but also controls the durable
+    /// dispatch-start marker (G4 handoff §19.1a) -- needed to fabricate the
+    /// "provider dispatch entered, outcome not yet durably known" fixture
+    /// distinct from "provider dispatch definitely not entered", which
+    /// [`write_persisted`]'s `dispatch_marker: false` always represents.
+    fn write_persisted_with_dispatch_marker(
+        dir: &Path,
+        state: TransactionState,
+        apply_outcome: Option<ApplyOutcome>,
+        dispatch_marker: bool,
+    ) -> TransactionId {
         let transaction_id = TransactionId::generate();
         let record = PersistedTransactionRecord {
             schema_version: guardian_core::transaction::persistence::CURRENT_SCHEMA_VERSION,
@@ -807,6 +1354,7 @@ mod tests {
             state,
             arbitration_revision: Some(1),
             apply_outcome,
+            dispatch_marker,
             last_observation: None,
             rollback_result: None,
             cancellation_requested: false,
@@ -1189,16 +1737,24 @@ mod tests {
     }
 
     /// Regression guard for the `SafeToResume` authorization invariant
-    /// documented on `reconstruct_for_resume`: independently re-derives,
-    /// from the actual source text, that `txn::engine::apply` has exactly
-    /// two call sites in this file, and that the client-facing one (in
-    /// `run_guarded_write`) is textually after its function's own call to
-    /// `txn::engine::authorize`. A future change that adds a third call
-    /// site, or reorders authorize/apply in the client-facing path, fails
-    /// this test loudly instead of silently invalidating the recovery
-    /// authorization assumption.
+    /// documented on `reconstruct_for_resume`/`resolve_recovered_restart`:
+    /// independently re-derives, from the actual source text, that
+    /// `txn::engine::apply` has exactly **four** call sites in this file —
+    /// two per capability family (`run_guarded_write` +
+    /// `resolve_recovered`'s `SafeToResume` branch for G7's counter;
+    /// `run_restart_capability` + `resolve_recovered_restart`'s
+    /// `SafeToResume` branch for Wave 1's `cups-restart`, added under this
+    /// same invariant, not a new one) — and that each client-facing call
+    /// site is textually after its own function's real authorization call
+    /// (`txn::engine::authorize` for G7's `PolkitAction` path;
+    /// `authorize_provider_request` for Wave 1's `ProviderAuthorizationRequest`
+    /// path). A future change that adds a fifth call site, or reorders
+    /// authorize/apply in either client-facing path, fails this test loudly
+    /// instead of silently invalidating the recovery authorization
+    /// assumption.
     #[test]
-    fn exactly_two_apply_call_sites_and_the_client_facing_one_is_strictly_after_authorize() {
+    fn exactly_four_apply_call_sites_and_each_client_facing_one_is_strictly_after_its_own_authorize()
+     {
         // Scan only the production code, not this test module's own text
         // (which necessarily contains the literal search strings too).
         let full_source = include_str!("main.rs");
@@ -1207,10 +1763,12 @@ mod tests {
             .expect("this test module marker must exist")];
         let apply_call_count = source.matches("txn::engine::apply(").count();
         assert_eq!(
-            apply_call_count, 2,
-            "expected exactly two call sites for txn::engine::apply (run_guarded_write and \
-             resolve_recovered's SafeToResume branch) -- a new call site must be justified \
-             against the SafeToResume authorization invariant before being added"
+            apply_call_count, 4,
+            "expected exactly four call sites for txn::engine::apply (two per capability \
+             family: run_guarded_write/resolve_recovered for G7's counter, \
+             run_restart_capability/resolve_recovered_restart for Wave 1's cups-restart) -- a \
+             new call site must be justified against the SafeToResume authorization invariant \
+             before being added"
         );
 
         let run_guarded_write_start = source.find("async fn run_guarded_write").unwrap();
@@ -1227,6 +1785,37 @@ mod tests {
         assert!(
             authorize_pos < apply_pos,
             "run_guarded_write must call authorize strictly before apply"
+        );
+
+        // `run_restart_capability` delegates its Authorize step to
+        // `restart_authorize` (extracted only to stay under clippy's
+        // function-length lint) -- confirm the delegation happens strictly
+        // before `txn::engine::apply`, and that `restart_authorize` itself
+        // genuinely calls the real `authorize_provider_request` entry
+        // point before ever reporting success.
+        let run_restart_start = source.find("async fn run_restart_capability").unwrap();
+        let run_restart_body = &source[run_restart_start..];
+        let run_restart_end = run_restart_body.find("\n}\n").unwrap();
+        let run_restart_body = &run_restart_body[..run_restart_end];
+
+        let authorize_pos = run_restart_body
+            .find("restart_authorize(")
+            .expect("run_restart_capability must call restart_authorize");
+        let apply_pos = run_restart_body
+            .find("txn::engine::apply(")
+            .expect("run_restart_capability must call txn::engine::apply");
+        assert!(
+            authorize_pos < apply_pos,
+            "run_restart_capability must call restart_authorize strictly before apply"
+        );
+
+        let restart_authorize_start = source.find("async fn restart_authorize").unwrap();
+        let restart_authorize_body = &source[restart_authorize_start..];
+        let restart_authorize_end = restart_authorize_body.find("\n}\n").unwrap();
+        let restart_authorize_body = &restart_authorize_body[..restart_authorize_end];
+        assert!(
+            restart_authorize_body.contains("authorize_provider_request("),
+            "restart_authorize must call the real authorize_provider_request entry point"
         );
     }
 

@@ -7,6 +7,7 @@
 
 pub mod polkit;
 
+use std::collections::HashMap;
 use std::future::Future;
 
 use crate::error::{GuardianDbusError, GuardianErrorCategory};
@@ -142,6 +143,36 @@ impl AuthorizationOutcome {
             ),
         }
     }
+
+    /// The [`ProviderAuthorizationRequest`] counterpart to
+    /// [`Self::into_dbus_error`] — identical mapping (G1's 17-category
+    /// taxonomy is reused unmodified; handoff §11), keyed on the mediated
+    /// provider action id rather than a [`PolkitAction`].
+    #[must_use]
+    pub fn into_provider_dbus_error(
+        self,
+        request: &ProviderAuthorizationRequest,
+    ) -> Option<GuardianDbusError> {
+        match self {
+            Self::Authorized => None,
+            Self::Denied => Some(
+                GuardianErrorCategory::NotAuthorized
+                    .with_message(format!("authorization denied for {}", request.action_id())),
+            ),
+            Self::Unavailable(AuthorizationUnavailableReason::InteractionRequiredButDisallowed) => {
+                Some(GuardianErrorCategory::NotAuthorized.with_message(format!(
+                    "interaction-required-but-disallowed for {}",
+                    request.action_id()
+                )))
+            }
+            Self::Unavailable(AuthorizationUnavailableReason::NoAuthenticationAgent) => Some(
+                GuardianErrorCategory::AuthenticationUnavailable.with_message(format!(
+                    "no authentication mechanism available for {}",
+                    request.action_id()
+                )),
+            ),
+        }
+    }
 }
 
 /// A failure to *obtain* an authorization decision at all — deliberately
@@ -202,5 +233,133 @@ pub trait Authorizer {
     fn authorize(
         &self,
         request: &AuthorizationRequest,
+    ) -> impl Future<Output = Result<AuthorizationOutcome, AuthorizationError>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Wave 1 (TDD contract §50; `GUARDIAN_WAVE1_IMPLEMENTATION_HANDOFF.md` §7/§10)
+// ---------------------------------------------------------------------------
+//
+// `PolkitAction` above remains reserved for Guardian-owned decisions only —
+// nothing below adds a variant to it, and nothing below is a generic
+// action-id/detail-map broker. `ProviderAuthorizationRequest` is a closed,
+// disjoint representation of a *provider-owned* policy decision Guardian
+// mediates on a resolved caller's behalf: each variant derives both its
+// action id and its complete authorization details internally, from an
+// already-resolved, Guardian-controlled capability row — never from caller
+// input, and never as an open `details: HashMap<String, String>`-shaped
+// parameter reachable from outside this module's own construction of the
+// request.
+
+/// A resolved, already-validated Wave 1 restart-capability row.
+///
+/// Carries only the canonical systemd unit name a Guardian-compiled/
+/// configured capability table (`guardian-helper`'s own, §10) has already
+/// resolved from a `capability_id` — this type is never constructed from a
+/// caller-supplied unit name, and nothing here accepts one. It exists here,
+/// in `authorization.rs`, only because [`ProviderAuthorizationRequest`]
+/// needs a concrete, typed field to derive its action id/details from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RestartCapability {
+    unit_name: String,
+}
+
+impl RestartCapability {
+    /// Constructs a resolved capability row from an already-governed unit
+    /// name (e.g. the single `cups-restart` → `cups.service` row in
+    /// `guardian-helper`'s own compiled/configured capability table).
+    #[must_use]
+    pub fn new(unit_name: impl Into<String>) -> Self {
+        Self {
+            unit_name: unit_name.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn unit_name(&self) -> &str {
+        &self.unit_name
+    }
+}
+
+/// A provider-owned authorization request Guardian mediates on a resolved
+/// caller's behalf — disjoint from [`PolkitAction`], which is reserved for
+/// Guardian-owned decisions only. Each variant represents one real,
+/// already-shipped provider operation; both its action id and its complete
+/// authorization details are derived entirely from the already-resolved,
+/// Guardian-controlled capability carried inside it — never from caller
+/// input, and never as an open detail map (handoff §7, corrected four
+/// times; TDD contract §50's relay-authorization rule).
+#[derive(Clone, Debug)]
+pub enum ProviderAuthorizationRequest {
+    /// systemd's own real `manage-units` request for a Wave 1
+    /// `RestartCapability` row.
+    SystemdRestart { capability: RestartCapability },
+}
+
+impl ProviderAuthorizationRequest {
+    /// The provider's own real, already-shipped polkit action id — never a
+    /// caller-supplied or otherwise dynamically constructed string
+    /// (W1-AUTH-005/W1-AUTH-007).
+    #[must_use]
+    pub fn action_id(&self) -> &'static str {
+        match self {
+            Self::SystemdRestart { .. } => "org.freedesktop.systemd1.manage-units",
+        }
+    }
+
+    /// The complete, real authorization details systemd itself sends for
+    /// this exact request — all four evidenced fields (handoff §7's
+    /// "fidelity floor, not ceiling"), derived from `capability` alone, with
+    /// no other parameter available to influence them (W1-AUTH-007).
+    ///
+    /// **Correction (W1-AUTH-007/W1-VM-007 re-capture)**: `polkit.message`
+    /// is systemd's own literal, unsubstituted `"Authentication is required
+    /// to restart '$(unit)'."` template — not a Guardian-side interpolation
+    /// of the unit name. A fresh runtime interception of systemd's real
+    /// `CheckAuthorization` request for `manage-units` established this;
+    /// earlier Wave 1 evidence/planning had recorded the interpolated form
+    /// (e.g. `'cups.service'`), which this corrects. Runtime systemd
+    /// behavior is authoritative for Wave 1 parity — see
+    /// `docs/evidence/wave1/` and the governing handoff/contract text for
+    /// the full correction note. Guardian must reproduce the literal
+    /// template unchanged; substituting `$(unit)` is polkit's own job (its
+    /// agent performs the substitution when displaying the prompt), not
+    /// something any caller of this mediated path may do.
+    #[must_use]
+    pub fn details(&self) -> HashMap<&'static str, String> {
+        match self {
+            Self::SystemdRestart { capability } => HashMap::from([
+                ("unit", capability.unit_name().to_owned()),
+                ("verb", "restart".to_owned()),
+                (
+                    "polkit.message",
+                    "Authentication is required to restart '$(unit)'.".to_owned(),
+                ),
+                ("polkit.gettext_domain", "systemd".to_owned()),
+            ]),
+        }
+    }
+}
+
+/// A pluggable provider-authorization decision source — the
+/// [`ProviderAuthorizationRequest`] counterpart to [`Authorizer`]. Kept as a
+/// separate trait (rather than a new [`Authorizer`] method) so
+/// [`Authorizer::authorize`]'s existing signature, and every existing
+/// [`PolkitAction`] call site's empty-details behavior, remains completely
+/// untouched.
+///
+/// Production code uses [`polkit::PolkitAuthorizer`]. Tests use a
+/// deterministic test double capable of asserting on the exact action
+/// id/details map it received, to catch a future regression to empty or
+/// partial details.
+pub trait ProviderAuthorizer {
+    /// Decides the outcome of mediating `request` for `subject` — the real,
+    /// resolved original caller, never `guardian-helper`'s own identity
+    /// (W1-AUTH-001/W1-AUTH-004).
+    fn authorize_provider_request(
+        &self,
+        subject: &CallerIdentity,
+        request: &ProviderAuthorizationRequest,
+        interactive: bool,
     ) -> impl Future<Output = Result<AuthorizationOutcome, AuthorizationError>> + Send;
 }

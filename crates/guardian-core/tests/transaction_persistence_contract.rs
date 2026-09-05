@@ -19,6 +19,7 @@ fn base_record() -> PersistedTransactionRecord {
         state: TransactionState::Applying,
         arbitration_revision: Some(3),
         apply_outcome: Some(ApplyOutcome::ConfirmedSuccess),
+        dispatch_marker: false,
         last_observation: None,
         rollback_result: None,
         cancellation_requested: false,
@@ -40,6 +41,52 @@ fn atomic_persist_then_load_round_trips() {
     persist(&dir, &record).unwrap();
     let loaded = load(&dir, &record.transaction_id).unwrap();
     assert_eq!(loaded, record);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// G4 extension (G4 handoff §19.1a): `dispatch_marker` round-trips through
+/// a real persist/load cycle exactly like every other field, both when
+/// `true` and when absent from an older-shaped record on disk (backward
+/// compatibility for evidence/records written before this extension).
+#[test]
+fn dispatch_marker_round_trips_through_persistence() {
+    let dir = temp_dir("dispatch-marker-round-trip");
+    let mut record = base_record();
+    record.apply_outcome = Some(ApplyOutcome::NotRecorded);
+    record.dispatch_marker = true;
+    persist(&dir, &record).unwrap();
+    let loaded = load(&dir, &record.transaction_id).unwrap();
+    assert_eq!(loaded, record);
+    assert!(loaded.dispatch_marker);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A persisted record written before this extension existed (no
+/// `dispatch_marker=` line at all) must load with `dispatch_marker: false`
+/// -- exactly the pre-extension semantics ("no marker means dispatch
+/// definitely not entered"), never a load failure and never a silent
+/// `true`.
+#[test]
+fn absent_dispatch_marker_field_defaults_to_false_for_backward_compatibility() {
+    let dir = temp_dir("dispatch-marker-absent");
+    std::fs::create_dir_all(&dir).unwrap();
+    let id = TransactionId::generate();
+    let text = format!(
+        "schema_version={CURRENT_SCHEMA_VERSION}\n\
+         transaction_id={id}\n\
+         idempotency_key=idem-legacy-0001\n\
+         capability_id=storage.device.poweroff\n\
+         provider_id=fixture-provider-a\n\
+         state=applying\n\
+         apply_outcome=not_recorded\n\
+         cancellation_requested=false\n\
+         deadline_expired=false\n"
+    );
+    std::fs::write(dir.join(format!("{id}.txn")), text).unwrap();
+
+    let loaded = load(&dir, &id).unwrap();
+    assert!(!loaded.dispatch_marker);
+
     std::fs::remove_dir_all(&dir).ok();
 }
 

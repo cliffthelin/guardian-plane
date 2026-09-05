@@ -2327,6 +2327,104 @@ it must not silently begin:
   changes, forced USB resets, automatic service disabling) under any
   circumstance as part of Wave 1.
 
+## §50.x — G4 extension: durable Apply-dispatch marker (added by this revision, repair pass)
+
+**This is a disclosed, narrow, Wave-1-required extension to already-tagged
+G4 production machinery — not folded in silently as if it were always
+part of G4, and not a Wave-1-specific hack.** Recorded here, under §50,
+because it was discovered and required by Wave 1's first real external
+mutation, exactly like the relay-authorization rule above.
+
+**What was found.** §8 of `GUARDIAN_WAVE1_IMPLEMENTATION_HANDOFF.md`
+requires a crash strictly during the in-flight `RestartUnit` D-Bus call to
+classify as `StateAmbiguous` (via `ApplyOutcome::PartialOrUncertainMutation`),
+using the unmodified `crates/guardian-core/src/transaction/{engine,
+recovery}.rs`. Real VM evidence
+(`docs/evidence/wave1/wave1_vm005_finding.md`) proved this was
+unreachable as originally built: `engine::apply` persists only two
+durable facts — Apply-intent (`ApplyOutcome::NotRecorded`, written
+*before* the provider is ever called) and Apply-outcome (written *after*
+the provider call returns). A process killed strictly inside the
+provider call window leaves only the first fact durable, which is
+*identical on disk* to a crash that happened before the provider was ever
+invoked — both read back as `NotRecorded`, and `classify_applying` (the
+unmodified classifier) correctly, but wrongly-for-this-purpose, maps that
+to `SafeToResume`. This is a genuine gap in the **original G4 design**,
+not something specific to Wave 1's capability: G4's original persistence
+sequencing never durably distinguished "provider dispatch not yet
+attempted" from "provider dispatch attempted, outcome not yet known" —
+Wave 1 is simply the first real mutation to make that gap observable,
+because G7's own fixture (`CounterAdapter`) has no meaningful window
+during which a real external system could receive a call Guardian itself
+cannot durably confirm.
+
+**Why silent resolution was rejected.** Three alternatives were
+considered and rejected during the original implementation pass (full
+reasoning in `wave1_vm005_finding.md`): weakening the `StateAmbiguous`
+requirement for this crash point (rejected — the handoff is explicit and
+binding, and a second `RestartUnit` call, while empirically safe for this
+specific idempotent unit, is not a justification for silently overriding
+a named safety requirement); pre-writing `PartialOrUncertainMutation`
+from `guardian-helper` before calling `engine::apply` (rejected on
+inspection — `engine::apply`'s own entry gate would then refuse to call
+the provider at all, since it treats any pre-existing non-`NotRecorded`
+outcome as evidence of a prior attempt); and accepting `SafeToResume`'s
+actual behavior as good enough (rejected — the contract's explicit,
+named requirement for this crash point governs regardless of whether a
+retry happens to be safe in this instance).
+
+**The governed decision.** Do not weaken `W1-REC-003`. Add the minimum
+durable G4 metadata necessary to distinguish "provider dispatch
+definitely not entered" from "provider dispatch entered, outcome not yet
+durably known." Concretely:
+
+- `ApplyRecord` (`crates/guardian-core/src/transaction/apply.rs`) gains
+  one new durable field: `dispatch_marker: bool`.
+- `engine::apply` (`crates/guardian-core/src/transaction/engine.rs`) now
+  performs **three** durable persists instead of two: Apply-intent
+  (unchanged) → a new durable dispatch-start-marker persist
+  (`dispatch_marker = true`), immediately before `provider.apply` is
+  invoked → Apply-outcome (unchanged, after the call returns). A crash
+  after the marker but strictly before the real provider call is
+  conservatively classified as `StateAmbiguous` too — this is
+  **deliberate and acceptable**: false ambiguity (an unnecessary
+  `StateAmbiguous` for a crash a few instructions before the actual
+  D-Bus call) is safer than false certainty (auto-replaying a call that
+  may have already escaped).
+- `PersistedTransactionRecord`/`RecoverySnapshot`
+  (`crates/guardian-core/src/transaction/{persistence,recovery}.rs`) carry
+  `dispatch_marker` through load/save and into classification. A record
+  persisted before this extension existed (no `dispatch_marker=` line at
+  all) loads with `dispatch_marker: false` — the correct pre-extension
+  reading ("no marker recorded" means "dispatch was never durably marked
+  as started", which is exactly what "marker absent" already meant before
+  this extension existed).
+- `classify_applying` now returns `StateAmbiguous` (not `SafeToResume`)
+  whenever `apply_outcome` is `NotRecorded`/absent **and**
+  `dispatch_marker` is `true`. Every other branch of `classify_applying`,
+  every other `RecoveryClassification` variant, and the rest of the 15-state
+  machine/legal-transition graph are byte-for-byte unchanged.
+
+**Scope of this extension.** Nothing about G4 changes outside this one
+Apply-dispatch-observability question. No new public `TransactionState`
+was introduced (the extension lives entirely inside `APPLYING`'s existing
+durable metadata, as directed). No existing G4 test's expected outcome
+changed — every crash point in §8's table other than the in-flight-call
+row is provably unaffected, and this is proven by the full, unmodified
+`transaction_recovery_contract.rs`/`transaction_apply_persistence_contract.rs`
+suites continuing to pass, plus new tests added specifically for this
+extension (crash-before-marker retains old semantics; marker-set-no-
+outcome is `StateAmbiguous`; known success/failure are unaffected; no
+ambiguous Apply ever classifies `SafeToResume`).
+
+**Real VM re-evidence.** The identical W1-VM-005 kill-9 procedure,
+re-run against the extended engine, now durably records
+`dispatch_marker=true` at the crash point and resolves to `RolledBack`
+(via `StateAmbiguous`'s fail-closed best-effort-rollback path) on
+restart — not `Committed` (the prior, unsafe, auto-replayed outcome). Full
+before/after evidence: `docs/evidence/wave1/wave1_vm005_finding.md`'s
+"Resolution" section.
+
 ## Consequences
 
 Guardian's transaction/safety framework (G1–G4) is now tested against a
@@ -2401,6 +2499,25 @@ candidate.
   decided prematurely here. Nothing in this revision weakens the
   acceptance bar to fit a specific candidate — it corrects the bar
   itself, a third time.
+- 2026-09-04, sixth revision (repair pass, this one): a fresh disposable-
+  VM re-run of the implementation candidate's own reported findings
+  confirmed two genuine conflicts between this amendment/its handoff and
+  reality, both adjudicated here rather than re-litigated by the repair
+  pass: (1) W1-REC-003's in-flight-`RestartUnit` crash point could not
+  actually be reached by the unmodified G4 engine/classifier — resolved
+  by §50.x's new durable Apply-dispatch-marker extension, added above,
+  rather than weakening the requirement; (2) the fifth revision's own
+  `polkit.message` worked examples in `GUARDIAN_WAVE1_IMPLEMENTATION_
+  HANDOFF.md` (§7/§10/§12's `W1-AUTH-007`) had drifted to the
+  unit-interpolated form (`"...restart 'cups.service'."`) despite this
+  contract's own §50 wire capture already correctly showing the literal,
+  unsubstituted `"...restart '$(unit)'."` template — resolved by
+  correcting the handoff's worked examples and the shipped
+  `ProviderAuthorizationRequest::details()` implementation to match this
+  contract's own already-correct evidenced value, confirmed with fresh
+  native-vs-mediated VM re-evidence. See §50.x above and
+  `docs/evidence/wave1/wave1_vm005_finding.md`/`checkauth-comparison.md`'s
+  "Resolution" sections for the full record of both.
 
 ## Rollback / migration implications
 

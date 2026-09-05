@@ -844,8 +844,10 @@ dependencies = [
 name = "guardian-helper"
 version = "0.1.0"
 dependencies = [
+ "futures-lite",
  "guardian-core",
  "guardian-provider-api",
+ "guardian-testkit",
  "zbus",
 ]
 
