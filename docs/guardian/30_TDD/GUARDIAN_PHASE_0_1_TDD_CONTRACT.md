@@ -1966,4 +1966,447 @@ This contract is derived from:
 
 The research artifact remains the evidence/reference document.
 
-This TDD contract is the implementation-governing document for Phase 0 and Phase 1.
+This TDD contract is the implementation-governing document for Phase 0 and
+Phase 1. See §50 for an amendment extending its governance to Wave 1.
+
+---
+
+# 50. Amendment — Wave 1: first production mutation capability
+
+- Status: Accepted
+- Date: 2026-09-04 (revised 2026-09-04 after independent planning review;
+  see "Revision history" at the end of this section)
+- Clarifies sequencing relative to §47 ("Handoff to TDD-contract Phase
+  2"). Does not rename, renumber, or relocate §47's own scope.
+
+## Context
+
+G0 through G9 are independently gated, accepted, committed, and tagged
+(`phase0-g0-public-contracts` through `phase0-g9-clients-packaging`) —
+Phase 1's exit criteria (§46) are satisfied. §47, as originally written,
+characterized the next TDD-contract phase ("TDD-contract Phase 2") as
+expanding **read-only observability and correlation** only, with no
+mention of a production write path. Planning work for a first production
+mutation capability was requested at this point in the project's
+history. §47's original framing does not authorize that work as
+written, and per this contract's own §48/AGENTS.md discipline ("stop and
+record the ambiguity as a contract issue rather than silently choosing a
+new architecture"), that gap was surfaced rather than silently bridged.
+
+**This contract uses the unqualified term "Phase 2" nowhere below this
+point — only "TDD-contract Phase 2" or "master-spec Phase 2," always
+qualified.** An independent review of the first version of this section
+found that its own text simultaneously called Wave 1's mutation work
+"TDD-contract Phase 2" (to justify a `P2-*` ID prefix) while *also*
+continuing to call §47's original, undisturbed scope "TDD-contract
+Phase 2" — two different things sharing one unqualified label inside
+the same governing section, with no
+rule for which one a `P2-*` ID would belong to once the read-only work
+actually starts. That defect is fixed by this revision: **Wave 1 is not
+TDD-contract Phase 2, was never renamed to TDD-contract Phase 2, and does
+not consume that label in any sense.** It is a separate, unnumbered,
+interstitial phase, and its own normative IDs use a distinct prefix
+(`W1-`, never `P2-`) precisely so they can never be confused with the
+numbered `P0-`/`P1-` sequence or with whatever prefix a future, real
+TDD-contract Phase 2 implementation eventually adopts for its own IDs.
+
+This section preserves §47 unchanged above (per AGENTS.md's "supersede,
+don't hide" rule for historical decisions) and adds, alongside it, a
+narrowly-scoped, evidence-gated phase named **Wave 1**, whose sole
+purpose is proving the G4 transaction engine and G1/G2 authorization/
+privilege model against one real production write path. §47's own
+read-only observability/correlation expansion (TDD-contract Phase 2)
+remains valid future work and is not itself started by this amendment —
+Wave 1 and TDD-contract Phase 2 are independent, not sequential; nothing
+here requires one to finish before the other begins, and nothing here
+implies Wave 1 precedes or follows TDD-contract Phase 2 in any required
+order.
+
+**Disambiguation rule, binding on every future reference in this
+document and in any Wave 1 handoff**: this contract has, after this
+amendment, exactly three distinct things that must never be referred to
+by the bare word "Phase 2" without a qualifier:
+
+```text
+TDD-contract Phase 2   — §47's read-only observability/correlation
+                          expansion. Unchanged, unrenamed, unstarted.
+master-spec Phase 2    — the master spec's own, differently-numbered
+                          staged rollout ("Phase 2 — I/O Guardian"),
+                          an entirely separate numbering system.
+Wave 1                 — this section's own interstitial phase. Not a
+                          numbered phase in either system above.
+```
+
+## Decision
+
+Wave 1 authorizes exactly one first production mutation capability,
+selected and planned under the acceptance bar below, before any other
+new write capability. It does not authorize master-spec-Phase-2 (I/O
+Guardian), TDD-contract-Phase-2 read-only correlation/incident
+intelligence, or any other master-spec-numbered phase — those remain
+separately gated, exactly as before this amendment, and exactly as
+before this revision.
+
+## Wave 1 acceptance bar
+
+A candidate capability is eligible for selection as Guardian's first
+production mutation only if it satisfies every one of the following,
+with real evidence, not assertion:
+
+- a narrow, typed operation — never a generic action-name/JSON broker,
+  never `RunCommand`/`RunShell` or an equivalent (AGENTS.md Privilege
+  rules, unchanged and non-negotiable here);
+- a real, already-evidenced G8 read provider to extend, or an accepted
+  G2 privilege classification (`docs/evidence/g2/
+  PRIVILEGE_REQUIREMENT_INVENTORY.md`) if no G8 provider exists yet;
+- an identified, non-`Conflict` authorization owner, decided under the
+  **relay-authorization rule** below — "provider-owned authorization"
+  (per G2's inventory classification) is a real, useful signal about
+  *which provider is authoritative*, but it is **not**, by itself,
+  sufficient reason to skip a real, independent authorization check for
+  the real caller — that check must query the provider's own action, not
+  a Guardian-invented substitute (see the relay-authorization rule);
+- deterministic preconditions the G4 `Validate` step can check before
+  any mutation begins;
+- a real, externally observable postcondition Guardian can `Observe`
+  without guessing (TDD contract §14/§19's Apply/Observe/Confirm
+  discipline, unmodified);
+- bounded, narrow blast radius — one explicitly-named target, never an
+  arbitrary or client-suppliable target set;
+- a real rollback or compensating action, or an honest `RollbackKind::
+  None` disclosure if none exists (§13's existing `RollbackKind`
+  taxonomy, unmodified — no new rollback category is introduced by this
+  amendment);
+- no irreversible physical-hardware action;
+- fully closable with real disposable-VM evidence (§35 Layer 4), with no
+  physical-hardware layer (§35 Layer 5) required to reach acceptance;
+- a `RecoveryClassification` (`crates/guardian-core/src/transaction/
+  recovery.rs`, unmodified) provably derivable for every crash point in
+  its own Apply/Observe sequence — `SafeToResume` must be earned per
+  candidate, never inherited from G7's `GuardedWrite` evidence fixture;
+  if it cannot be proven, the conservative classification (`MustObserve`/
+  `MustRollback`/`StateAmbiguous`/`RequiresHumanRecovery`, whichever the
+  actual uncertainty demands) is used, not `SafeToResume` by default;
+- resolvable single-writer/competing-writer semantics using the existing
+  Provider Arbitrator (`crates/guardian-core/src/arbitration.rs`,
+  unmodified — this amendment does not authorize changing it) — if the
+  Arbitrator's existing `Ownership`/`ArbitrationDecision` model cannot
+  represent the candidate's real writer landscape, that candidate is not
+  eligible until the Arbitrator itself is extended under its own gate
+  discipline, not silently worked around.
+
+## The relay-authorization rule (added by this revision; corrected below, three times)
+
+An independent planning review of the first version of this section
+found, and empirically confirmed against real `systemd`/polkit behavior
+in a disposable VM, a defect this rule closes: "provider-owned
+authorization" (G2's classification: *the provider performs its own
+polkit check*) is a true statement about the provider's own D-Bus
+surface, but it silently stops being a meaningful authorization
+boundary once Guardian's own privileged process (`guardian-helper`,
+`User=root` per ADR-002/G7) is the one that actually issues the D-Bus
+call. Polkit authorizes *whoever is on the wire* — for a call
+`guardian-helper` makes on the system bus, that is `guardian-helper`
+itself (root), not the real end client, because an ordinary D-Bus method
+call carries no forwarded/impersonated subject. A provider's own
+`auth_admin`-class check therefore passes unconditionally for a root
+caller, regardless of who the real requester was — this is not a
+theoretical risk, it was reproduced directly (an unprivileged, non-admin
+VM user's own `RestartUnit` call was correctly denied against that
+user's identity; the identical call issued as root returned a job path
+with no check performed at all).
+
+A second independent review, focused specifically on the fix the first
+review's finding produced, found that fix itself defective: requiring a
+brand-new **Guardian-owned** `PolkitAction`/`.policy` action for every
+relayed "provider-owned" capability does not preserve provider-owned
+authorization — it silently replaces it. Two distinct claims were being
+conflated:
+
+```text
+trusted to query polkit's authorization decision for another subject
+≠
+owner of the policy that decision is made against
+```
+
+`guardian-helper` running as root, with `resolve_caller_identity`
+resolving the real caller from its own inbound D-Bus connection, gives
+it the first property (per ADR-002's trusted-caller finding). Nothing
+about that trusted-caller property requires or implies the second:
+`guardian-helper` may query the *provider's own, real, already-shipped*
+polkit action for the resolved caller, and that continues to be a
+provider-owned decision — the provider's own `.policy` file, and
+whatever an OS administrator has already configured against it, remains
+authoritative. A Guardian-invented action instead makes Guardian's own
+policy the effective authority for the operation (any existing OS-admin
+grant/denial against the provider's real action becomes irrelevant; a
+separate, Guardian-only grant could diverge from the provider's own
+policy in either direction) — which is a real reclassification from
+provider-owned to Guardian-owned authorization that the first fix made
+silently, never stating or justifying it as such.
+
+A third independent review, examining whether this corrected rule was
+actually *implementable* against the real, existing authorization
+machinery, found it was not, as originally worded: `PolkitAction`
+(`crates/guardian-core/src/authorization.rs`) is a closed enum with no
+generic, string-carrying variant, and `Authorizer::authorize()` takes a
+typed `PolkitAction`, not a raw action-id string — there was, and is, no
+way to check `org.freedesktop.systemd1.manage-units` through that exact,
+unmodified type without either adding a new `PolkitAction` variant
+(reintroducing the second defect above) or otherwise changing
+`authorization.rs`'s shape, which the rule as first corrected never
+disclosed or scoped. The rule is corrected a second time below to close
+this gap, deliberately, without collapsing into a generic raw-string
+authorization surface.
+
+A fourth independent review, checking whether the type-level split alone
+was sufficient, found it was not: **checking the correct action id is
+necessary but not sufficient to reproduce a provider's real authorization
+decision.** Empirically confirmed by snooping the real `CheckAuthorization`
+call in a disposable VM (`busctl monitor --system`) while running
+`systemctl restart cups.service` as an unprivileged user, systemd's own
+request for `manage-units` carries non-empty polkit **details**, not an
+empty map:
+
+```text
+action_id: "org.freedesktop.systemd1.manage-units"
+details:
+  unit                  = "cups.service"
+  verb                  = "restart"
+  polkit.message        = "Authentication is required to restart '$(unit)'."
+  polkit.gettext_domain = "systemd"
+```
+
+A real administrator's polkit `.rules` file may legitimately branch on
+`action.lookup("unit")`/`action.lookup("verb")` — a standard, documented
+pattern for exactly this action (e.g. "allow `manage-units` only when
+`unit == "cups.service"` and `verb == "restart"`"). The existing
+`PolkitAuthorizer::authorize()` (`crates/guardian-core/src/authorization/
+polkit.rs`) hardcodes an **empty** `details` map for every current
+`PolkitAction` variant — reusing that transport unmodified, as the third
+correction assumed, would send systemd's real action id with no `unit`/
+`verb`, silently diverging from what a direct systemd call would present
+to the same admin policy. This is a real provider-policy-fidelity defect,
+not a cosmetic one: it means "provider policy remains authoritative"
+would be false for any detail-sensitive rule.
+
+**Binding rule (corrected a third time)**: `PolkitAction` remains
+reserved for **Guardian-owned** authorization decisions only — nothing
+here adds a systemd (or other provider) variant to it. A mediated
+provider-policy authorization request is more than an action id: it is
+the action id **plus every authorization-relevant detail the provider's
+own real request would carry**, all of it internally derived from
+already-validated, Guardian-controlled data — never from caller input,
+and never as an open `details: HashMap<String, String>`-shaped
+parameter a caller (or careless future call site) could populate
+arbitrarily. For Wave 1's one candidate, the complete, closed
+representation is conceptually:
+
+```text
+enum ProviderAuthorizationRequest {
+    SystemdRestart { capability: RestartCapability },
+    // action id, and details {unit, verb, polkit.message,
+    // polkit.gettext_domain}, are derived internally from `capability`
+    // -- never accepted as separate caller-suppliable fields.
+}
+```
+
+(exact Rust naming/shape is not binding — a fieldless `ProviderPolkitAction`
+enum may still exist internally if useful, but the handoff must make
+clear that *action identity alone is not the complete provider
+authorization request*; the resolved capability row is what the request
+is actually built from, and it must carry the complete details a genuine
+direct call would send — for Wave 1's evidenced request, all four
+observed fields: `unit`, `verb`, `polkit.message`, `polkit.gettext_domain`
+— not a partial subset chosen for convenience). A new, equally typed
+entry point (e.g. `authorize_provider_request(subject: CallerIdentity,
+request: ProviderAuthorizationRequest, interactive: bool)`) issues the
+real `CheckAuthorization` call built from that closed request against
+the resolved caller — it may share the existing `PolkitAuthorizer`/
+`CheckAuthorization` D-Bus plumbing internally (via a dedicated internal
+path that accepts the derived, closed details, not a globally-widened
+`details` parameter on every existing call), but its *public, typed*
+boundary remains closed exactly like `PolkitAction`'s: no caller-supplied
+raw action-id string, no caller-supplied detail keys or values, no
+generic `authorize_provider(action_id: &str, details: HashMap<String,
+String>, ...)`-shaped interface. The semantic split is explicit and
+permanent: `authorize(PolkitAction)` decides a Guardian-owned policy;
+`authorize_provider_request(ProviderAuthorizationRequest)` mediates a
+provider's own policy, complete with its real authorization-relevant
+context, for the resolved caller. Both may issue a `CheckAuthorization`
+D-Bus request underneath — what differs is *policy ownership*, and which
+action identifiers and detail values are even expressible, not the
+transport.
+
+If a future implementation pass discovers that the currently-shipped
+Ubuntu/systemd version sends additional or different authorization
+details for this exact operation than the four evidenced above,
+implementation MUST stop and reconcile this contract rather than
+silently dropping or inventing fields — the evidenced request above is
+the acceptance bar, not a floor implementation may freely fall below.
+
+Whenever a Wave 1 (or later) capability is realized by having
+`guardian-helper` issue a call to a "provider-owned authorization" D-Bus
+method on the real end client's behalf, `guardian-helper` MUST call
+`authorize_provider_request` against the real, resolved caller identity
+**before** making that call — using the *provider's own, real,
+already-shipped* action id **and its complete, evidenced authorization
+details** for the operation being relayed (e.g. action
+`org.freedesktop.systemd1.manage-units` with details `{unit:
+"cups.service", verb: "restart", polkit.message: "Authentication is
+required to restart '$(unit)'.", polkit.gettext_domain: "systemd"}` for
+Wave 1's own candidate — confirmed present at `/usr/share/polkit-1/
+actions/org.freedesktop.systemd1.policy` and empirically observed on the
+D-Bus wire in a disposable Ubuntu 26.04.1 VM), never a Guardian-invented
+`PolkitAction` substitute and never a partial details map missing fields
+the real provider request would carry. The target provider's own
+subsequent internal check is real and may still run — it is not
+redundant, since it still governs whatever policy the provider itself
+applies once the call arrives from root — but Guardian's own mediating
+check is what makes the decision discriminate between real end users,
+since the provider's own check alone cannot do that once relayed
+through root. This means "provider-owned authorization" no longer
+implies "no independent Guardian-side check is needed" (the first
+review's finding, still true), does NOT mean "therefore Guardian needs
+its own new, Guardian-owned `PolkitAction`" (the second review's
+finding, still true), and does NOT mean "the correct action id alone is
+sufficient" (the third review's finding, still true, and this
+revision's own subject) — the correct reading is "Guardian mediates the
+provider's own authorization decision for the real caller, reproducing
+the complete request the provider itself would issue, through its own
+closed, typed representation of that provider's policy and context; it
+does not become a second, competing authority, and it does not silently
+drop authorization-relevant context the provider's own admin policy may
+depend on." A relayed capability under this rule requires **no new
+`PolkitAction` variant and no new Guardian `.policy` file** — it
+requires a new, closed provider-authorization-request representation
+(action id and complete details, both internally derived from an
+already-resolved, Guardian-controlled capability, never from caller
+input) for the specific provider operation being mediated, which is a
+small, disclosed, independently-reviewable typed addition, not an
+open-ended authorization surface.
+
+This rule also explains, retroactively, why G7's own independent audit
+rejected an earlier `Guardian1.Transactions1.AttemptProviderDelegatedWrite`
+addition as "an unjustified permanent production API addition"
+(`docs/evidence/g7/G7_MILESTONE.md`, Round 1 finding) — that addition
+was the same relay shape this rule now governs explicitly, rather than
+leaving each future gate to rediscover the same defect independently.
+It does not, however, justify treating `GuardedWrite`'s own action
+(`io.github.cliffthelin.guardian.g7.bounded-write`) as a template for
+relayed *provider-owned* capabilities: `GuardedWrite`'s action is
+correct precisely because the write it gates has no other provider and
+is genuinely Guardian-owned — mirroring its shape for a capability that
+G2 already classified as provider-owned would mirror the wrong
+precedent, which is exactly the error this corrected rule fixes.
+
+## Required governing material for the Wave 1 candidate
+
+A Wave 1 implementation handoff and independent-review handoff, in the
+same paired structure every G0–G9 gate used, are required before any
+Wave 1 code is written — this amendment authorizes planning and
+candidate selection, not implementation. New normative IDs use the
+prefix **`W1-`** (e.g. `W1-MUT-*`, `W1-AUTH-*`, `W1-TXN-*`, `W1-REC-*`,
+`W1-VM-*`) — never `P2-*` or any other prefix from the `P<phase>-`
+numbered sequence, per the disambiguation rule above.
+
+## Scope exclusions (restated for this amendment)
+
+Wave 1 does not authorize, and any implementation handoff produced under
+it must not silently begin:
+
+- I/O Guardian (master-spec Phase 2 — UDisks/udev/PSI correlation chain,
+  recovery ladder, incident recorder);
+- TDD-contract Phase 2 read-only observability/correlation (§47's own
+  original scope, independent of Wave 1, not started by this amendment);
+- any master-spec-later-phase capability (thermal/power profiles beyond
+  a read-only extension, logs/incidents, general system management)
+  unless it is itself the one selected Wave 1 candidate;
+- the master spec's explicitly-deferred "highest-risk tier" operations
+  (general fan overclocking, kernel parameter tuning, automatic driver
+  changes, forced USB resets, automatic service disabling) under any
+  circumstance as part of Wave 1.
+
+## Consequences
+
+Guardian's transaction/safety framework (G1–G4) is now tested against a
+real external write, not only G7's evidence fixture — the actual
+architectural claim Phase 1 exists to support. TDD-contract Phase 2's
+read-only observability/correlation expansion remains available as
+independent future work, ungated by Wave 1's outcome either way. The
+relay-authorization rule is now standing architecture for any future
+gate that considers relaying a "provider-owned authorization" write
+through `guardian-helper` — it is not specific to Wave 1's own selected
+candidate.
+
+## Revision history
+
+- 2026-09-04, initial: authorized Wave 1, used a `P2-*` ID prefix and a
+  "provider-owned authorization... requires no new Guardian-side
+  privilege decision" acceptance-bar criterion.
+- 2026-09-04, second revision: an independent planning review found the
+  initial version's own text ambiguous about whether Wave 1 *was* Phase
+  2 (fixed by the disambiguation rule and the `W1-` prefix), and found,
+  with real VM evidence, that the "provider-owned authorization requires
+  no new Guardian-side decision" criterion was actually false for any
+  capability relayed through `guardian-helper` (fixed by the first
+  version of the relay-authorization rule, which required a new
+  Guardian-owned `PolkitAction`/`.policy` action for every such
+  capability).
+- 2026-09-04, third revision: a further independent review found the
+  second revision's own relay-authorization rule defective — requiring a
+  Guardian-owned action for a relayed provider-owned capability silently
+  converts that capability's authorization from provider-owned to
+  Guardian-owned, without ever stating or justifying that
+  reclassification, and discards any authorization meaning an OS
+  administrator's existing grants/denials against the provider's own
+  real action (e.g. `org.freedesktop.systemd1.manage-units`) already
+  had. The rule was corrected: `guardian-helper` mediates the provider's
+  own real polkit action for the resolved caller, rather than
+  substituting a Guardian-invented one.
+- 2026-09-04, fourth revision (this one): a further independent review
+  found the third revision's own rule unimplementable as worded against
+  the real, existing `PolkitAction`/`Authorizer` machinery — that
+  machinery has no way to represent or check a provider's own action id
+  without either reintroducing a Guardian-owned substitute (the second
+  revision's defect) or an undisclosed change to `authorization.rs`. The
+  rule is corrected above a second time: `PolkitAction` remains reserved
+  for Guardian-owned decisions only; a new, equally closed
+  `ProviderPolkitAction` enum (one variant for Wave 1,
+  `SystemdManageUnits`) represents provider-owned policy actions Guardian
+  is permitted to mediate, through a new, equally typed entry point —
+  never a generic raw-action-id interface. This is a small, disclosed,
+  independently-reviewable production change to `authorization.rs`
+  (previously described as remaining unmodified — that framing is
+  corrected here), not a new authorization model. Nothing in this
+  revision weakens the acceptance bar to fit a specific candidate — it
+  corrects the bar itself, again.
+- 2026-09-04, fifth revision (this one): a further independent review
+  found that the correct action id alone does not reproduce a
+  provider's real authorization decision — empirically confirmed by
+  observing systemd's real `manage-units` `CheckAuthorization` request
+  on the D-Bus wire in a disposable VM, which carries non-empty details
+  (`unit`, `verb`, `polkit.message`, `polkit.gettext_domain`) that a
+  real admin polkit rule may branch on, while the fourth revision's
+  design would have issued the mediated check with an empty details map.
+  The rule is corrected a third time: a mediated provider-authorization
+  request now means the action id **and** its complete, evidenced
+  authorization details, both derived internally from an already-
+  resolved, Guardian-controlled capability — never from caller input,
+  and never through an open `details` map any call site could populate
+  freely. All four evidenced detail fields are preserved for Wave 1's
+  candidate, not a subset chosen for convenience — distinguishing
+  normative policy context from presentation-only metadata is deferred
+  to a possible future general provider-authorization abstraction, not
+  decided prematurely here. Nothing in this revision weakens the
+  acceptance bar to fit a specific candidate — it corrects the bar
+  itself, a third time.
+
+## Rollback / migration implications
+
+If Wave 1's selected candidate is later found unsafe in practice, this
+amendment's acceptance bar — including the relay-authorization rule — is
+what any successor candidate must also satisfy; the bar itself is not
+weakened to accommodate a specific candidate's shortcoming. The
+candidate is replaced, or the Provider Arbitrator is extended under its
+own gate discipline first, as the specific failure requires.
