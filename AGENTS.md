@@ -6,6 +6,33 @@ These instructions govern all coding agents working in the Guardian repository.
 
 Guardian is an Ubuntu 26.04.1 system-control plane. It will eventually perform privileged and recovery-sensitive operations. Architectural shortcuts that would be harmless in an ordinary desktop application are not acceptable here.
 
+## Startup workflow for a governed gate task
+
+Added 2026-09-06 (procedural realignment; does not change any rule
+below). When a task assigns a specific gate:
+
+1. Read this file (`AGENTS.md`) — the rules below always apply.
+2. Read `docs/guardian/30_TDD/GUARDIAN_EXECUTION_PROTOCOL.md` — the
+   short, universal per-task procedure (baseline verification, RED→GREEN,
+   the mandatory Contract Collision preflight, scope discipline,
+   evidence-by-ID, commit-state discipline).
+3. Load exactly one assigned gate manifest under
+   `docs/guardian/30_TDD/gates/*-manifest.toml` — it states that gate's
+   owned normative IDs, allowed/forbidden scope, dependencies, required
+   test layers, validation commands, and commit policy.
+4. Read that manifest's linked, concise gate TDD file
+   (`docs/guardian/30_TDD/gates/*-tdd.md`) — required observable behavior
+   and acceptance evidence for that gate only.
+5. Consult the large historical handoffs/ADRs under `docs/guardian/30_TDD/`
+   and `docs/adr/` only when the manifest/TDD references them or when
+   resolving a genuine ambiguity — they remain the authoritative
+   planning/history/reference record, not an obligatory checklist to
+   re-read on every implementation turn.
+
+This does not apply to a gate that predates this workflow and has no
+manifest yet (G0–G9, Wave 1, Phase 2 Gate 2a) — those remain governed
+exactly as their own accepted handoffs specify.
+
 ## Source-of-governance order
 
 When instructions appear to conflict, use this order:

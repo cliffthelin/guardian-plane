@@ -2786,6 +2786,40 @@ independent-review handoff's corresponding audit instruction is revised
 to check for this exact, singular mechanism rather than "one of the
 disjunctive options."
 
+**Corrected (Gate 2a implementation-repair pass, 2026-09-06) — the
+ownership split behind "counter + log line" is now stated explicitly.**
+The text above states what must happen but not which crate performs the
+log write, and describing it as something "`CapacityRejected`" itself
+"writes" — while `CapacityRejected` is a `guardian-core` (library-crate)
+type — left the crate boundary ambiguous. This ambiguity led an
+implementer, during Gate 2a, to place the `eprintln!` call inside
+`guardian-core` itself, a real layering/gate-ownership violation caught
+by independent review before acceptance. The binding split, matching the
+accepted, tested Gate 2a code (`crates/guardian-core/src/correlation.rs`):
+`guardian-core`'s correlation engine performs the counter increment and
+returns a typed `CapacityRejected` value — zero I/O; `guardian-daemon`
+(Gate 2b) performs the actual `eprintln!` write when it consumes that
+value. `guardian-core` must never be required to perform daemon I/O to
+satisfy this rule. See the implementation handoff §7/§19 for the full
+corrected text.
+
+**PSI correlation identity, corrected (Gate 2a implementation-repair
+pass, 2026-09-06).** Decision item 3 above scopes PSI-event correlation
+into the Incident model without specifying its correlation key; the
+implementation handoff's §4.1 originally specified `normalized_key`,
+which was found, verified against real production source
+(`crates/guardian-core/src/providers/psi.rs`'s `event_from_crossing`), to
+embed transition-description text (`{from}->{to}`) that `normalize_key`
+does not strip — meaning two legitimate Critical-crossing events for the
+same resource with different transitions would not correlate under that
+wording. The corrected, binding rule: PSI events for the same source/
+resource correlate by the stable `resource_refs.first()`
+(`/proc/pressure/{resource}`) identity, never by transition-text-bearing
+`normalized_key`. This does not touch G3's `Event`/`normalize_key`
+semantics — only the Phase 2 correlation-rule text that referenced it
+incorrectly. See the implementation handoff §4.1 for the full corrected
+text.
+
 ## Disambiguation (restated, per §50's binding rule)
 
 This section adds no fourth meaning. "TDD-contract Phase 2" continues to
@@ -2905,6 +2939,36 @@ in the first repair pass's wording.
   semantics, the other two bounded structures, FC-N citations,
   provider-health scope-honesty, the normative-ID inventory's internal
   consistency, or the scope-completeness judgment) is re-litigated here.
+- 2026-09-06, Gate 2a implementation-repair pass (this one): two real,
+  concrete contract defects were discovered during Gate 2a implementation
+  and independently confirmed by review, both corrected here and in the
+  implementation handoff rather than left as prose findings in a
+  superseded handoff. (1) `P2-REC-003`'s "counter + log line" text stated
+  what must happen but not which crate performs the log write; describing
+  it as something `CapacityRejected` (a `guardian-core` library type)
+  itself "writes" left the crate boundary ambiguous, and this ambiguity
+  led an implementer to place the `eprintln!` call inside `guardian-core`
+  itself before independent review caught and repaired it — resolved by
+  the new "ownership split" text above in "Debounce-bound eviction
+  policy": `guardian-core` performs the counter increment and typed
+  return with zero I/O (Gate 2a); `guardian-daemon` performs the actual
+  log write when it consumes that value (Gate 2b). (2) the implementation
+  handoff's §4.1 PSI correlation key (`normalized_key`) was found, verified
+  against real production source (`providers/psi.rs`'s
+  `event_from_crossing`), to embed transition-description text that
+  `normalize_key` does not strip, meaning two legitimate Critical-crossing
+  events for the same resource with different transitions would not
+  correlate under that wording — resolved by the new "PSI correlation
+  identity, corrected" text above: the stable `resource_refs.first()`
+  identity is the binding correlation key, not `normalized_key`. Both
+  corrections match the committed, tested Gate 2a code
+  (`crates/guardian-core/src/correlation.rs`) exactly; neither changes any
+  `P2-*` ID's number, and neither reopens any item this section's prior
+  repair passes already closed. No prior gate's acceptance, tag, or
+  evidence is altered by this pass; only this planning candidate's own
+  text (here and in the implementation handoff) is corrected, the same
+  "supersede, don't hide" way this section has been revised in place
+  twice before.
 
 ## Rollback / migration implications
 

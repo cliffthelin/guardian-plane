@@ -147,9 +147,34 @@ list. Three correlation relationships are in scope; a fourth
 - **Source event(s)**: `Event`s produced by `providers::psi`'s
   `ThresholdMonitor::observe` crossing into `PressureSeverity::Critical`
   for a resource kind (cpu/memory/io).
-- **Correlation key**: `(source_provider = ProviderId("psi"),
-  normalized_key)`, where `normalized_key` already encodes the resource
-  kind per `event::normalize_key`.
+- **Correlation key**: **Corrected (Gate 2a implementation-repair pass,
+  2026-09-06) — original text below was wrong, verified against real
+  production source.** This row originally specified `(source_provider =
+  ProviderId("psi"), normalized_key)`, reasoning that `normalized_key`
+  "already encodes the resource kind per `event::normalize_key`." Reading
+  `crates/guardian-core/src/providers/psi.rs`'s actual `event_from_crossing`
+  directly shows this is false: `normalized_key` is derived from
+  `format!("PSI {resource} threshold crossing {:?}->{:?}", crossing.from,
+  crossing.to)`, passed through `normalize_key` (a pure lowercase/
+  whitespace-collapse transform that does **not** strip the `{from}->{to}`
+  transition text). Two legitimate Critical-crossing events for the
+  *same* resource but *different* transitions therefore get *different*
+  `normalized_key` values and would not correlate under the original
+  wording — a real defect, not a paraphrase issue. `resource_refs[0]`
+  (`format!("/proc/pressure/{resource}")`) is the actual stable resource
+  identity, unaffected by transition text. **Corrected rule, binding:**
+  PSI events for the same source/resource correlate by `(source_provider
+  = ProviderId("psi"), resource_refs.first())` — the stable PSI resource
+  identity — even when their transition-description text differs.
+  `normalized_key` remains G3 `Event`/`normalize_key` provenance exactly
+  as originally defined for other purposes (e.g. display, dedup-by-text
+  where that is what is wanted elsewhere); this correction only replaces
+  the *Phase 2 correlation-rule* text that incorrectly cited it, and does
+  not touch G3's `Event`/`normalize_key` semantics themselves. Gate 2a's
+  committed, tested implementation (`crates/guardian-core/src/
+  correlation.rs`) already correlates by `resource_refs.first()`, not
+  `normalized_key` — this correction brings the contract text into
+  agreement with the accepted implementation, not the other way around.
 - **Temporal window**: a fixed, configurable debounce window (default
   proposed: 30s, matching the daemon's existing monitoring-tick cadence
   order of magnitude — exact value is an implementation-time decision,
@@ -485,6 +510,43 @@ is required, not optional:
      `CapacityRejected` outcomes themselves.
 
    See `P2-REC-001`/`P2-REC-003`/`P2-REC-004`/`P2-REC-005` (§19).
+
+   **Corrected (Gate 2a implementation-repair pass, 2026-09-06) —
+   ownership of the two `CapacityRejected` observability actions is a
+   gate split, not a single undivided requirement.** The second repair
+   pass's wording above states *what* must happen (counter + log line)
+   but does not state *which crate performs the log write*, and citing
+   `crates/guardian-daemon/src/bin/guardian-daemon.rs`'s existing
+   convention while describing `CapacityRejected` as something "the
+   correlation engine" (a `guardian-core` library type) itself "writes"
+   left the boundary ambiguous. During Gate 2a implementation this
+   ambiguity led an implementer to place the `eprintln!` call inside
+   `guardian-core` — a real layering/gate-ownership violation
+   (`guardian-core` is a library crate; it must not perform daemon-shaped
+   I/O), caught and repaired before Gate 2a's independent review accepted
+   it. The now-accepted, tested, binding split, verified against the
+   committed `crates/guardian-core/src/correlation.rs`:
+
+   - **Gate 2a / `guardian-core`'s correlation engine** (already
+     implemented, tested, and closed at this handoff's Gate 2a baseline):
+     `reject_capacity()` rejects the new candidate, preserves existing
+     tracked candidates, increments the `saturating_add`-based rejection
+     counter, and returns a typed `AdmitOutcome::CapacityRejected`
+     value carrying `{capability_id, rejection_count}` — **zero I/O of
+     any kind.**
+   - **Gate 2b / `crates/guardian-daemon/src/bin/guardian-daemon.rs`**:
+     when the daemon tick consumes that typed `CapacityRejected` outcome,
+     it writes the one `eprintln!("[guardian-daemon] ...")` operational
+     log line, using the file's existing convention.
+
+   `guardian-core` must never be required to perform daemon I/O to
+   satisfy `P2-REC-003`. This does not change `P2-REC-003`'s substance
+   (both actions — counter and log line — are still required, always,
+   never a choice between them) — it corrects only the ownership
+   boundary the original wording left implicit. See §19's revised
+   `P2-REC-003` row and Gate 2b's manifest/TDD
+   (`docs/guardian/30_TDD/gates/phase2-2b-*`) for the binding split as
+   implemented.
 - **Event retention needed for correlation**: the correlation engine
   does not need its own separate unbounded event store — it consumes
   the same event stream `guardian-daemon`'s existing `BoundedRecorder`
@@ -725,6 +787,13 @@ never used anywhere in a produced `Incident`'s `summary`,
 kernel itself reports the threshold crossing), not a correlation claim,
 and is worded accordingly.
 
+**Correction pointer (Gate 2a implementation-repair pass, 2026-09-06):**
+§4.1's correlation-key row is corrected in place — PSI events correlate
+by the stable `resource_refs.first()` identity, never by
+transition-text-bearing `normalized_key`. See §4.1 for the full
+corrected text and rationale; this section's own terminology rules
+("correlated with"/"caused by") are unaffected by that correction.
+
 ---
 
 # 15. Incident severity/risk — deferred (corrected, repair pass)
@@ -895,14 +964,29 @@ reused for a different requirement; `P2-EVT-*`/`P2-COR-*`/
 `P2-API-002`/`P2-VM-*` are unaffected by this second repair pass and are
 carried forward unchanged.
 
+**Third revision note (Gate 2a implementation-repair pass, 2026-09-06).**
+Two contract defects discovered during Gate 2a implementation and
+independently confirmed by review are corrected here, matching the
+committed, tested Gate 2a code — no ID's number or normative substance
+changes, only ownership/identity text that was previously ambiguous or
+wrong: (1) `P2-REC-003`'s row is corrected to state the counter/log-line
+split explicitly by gate (`guardian-core`/Gate 2a: counter + typed
+return, zero I/O; `guardian-daemon`/Gate 2b: the actual `eprintln!`
+write) — see §7's corrected text; (2) §4.1's PSI correlation-key row is
+corrected from `normalized_key` (which embeds transition text and would
+wrongly split same-resource, different-transition events into separate
+groups) to `resource_refs.first()` (the actual stable PSI resource
+identity) — see §4.1's corrected text. `P2-COR-001`/`P2-COR-002` below
+are reworded to name the corrected key explicitly; no other row changes.
+
 | ID | Requirement |
 |---|---|
 | P2-EVT-001 | Correlation engine consumes events in **ingress order** (`CorrelationIngress`'s `ingress_clock`/`ingress_sequence`, §6), never insertion order and never a producer's own `timestamp_monotonic`, regardless of arrival order |
 | P2-EVT-002 | A duplicate `EventId` presented to the same open incident never appears twice in `event_ids` |
 | P2-EVT-003 *(new)* | Two events admitted from different fake producers with wildly different or backwards raw `timestamp_monotonic` values group according to ingress admission order, not raw timestamps |
 | P2-EVT-004 *(new)* | `CorrelationIngress`'s `ingress_clock`/`ingress_sequence` reset to a fresh epoch (sequence 0) on every `guardian-daemon` restart; no ordering guarantee is claimed or tested across a restart boundary |
-| P2-COR-001 | A PSI `Critical` event for a previously-nominal `(provider, resource)` key opens a new incident when none is open for that key |
-| P2-COR-002 | A second PSI `Critical` event for the same key within the debounce window (measured in ingress order) links to the existing open incident, not a new one |
+| P2-COR-001 *(key reworded, Gate 2a implementation-repair pass)* | A PSI `Critical` event for a previously-nominal `(provider, resource_refs.first())` key opens a new incident when none is open for that key — keyed by stable resource identity, never transition-text-bearing `normalized_key` (§4.1) |
+| P2-COR-002 *(key reworded, Gate 2a implementation-repair pass)* | A second PSI `Critical` event for the same `(provider, resource_refs.first())` key within the debounce window (measured in ingress order) links to the existing open incident, not a new one, even when its transition-description text differs from the first event's |
 | P2-COR-003 | A debounced `Available→Unavailable` transition for a `capability_id` opens or updates exactly one incident for that `capability_id` |
 | P2-COR-004 | A capability that flaps faster than the minimum dwell produces no incident open/close thrashing |
 | P2-COR-005 | Two temporally-overlapping incidents (one PSI, one provider-health) are cross-referenced with `confidence <= Hypothesis` and text using "correlated with," never "caused by" |
@@ -914,7 +998,7 @@ carried forward unchanged.
 | P2-INC-004 | A closed incident that later matches a new event produces a new `IncidentId` with a text backreference to the prior one, never a `Reopened` status (no such status is added) |
 | P2-REC-001 *(revised)* | The debounce/dwell bookkeeping ring never evicts an existing tracked candidate to admit a new one; capacity exhaustion produces a typed `CapacityRejected` outcome for the new candidate only |
 | P2-REC-002 | Correlation never calls `budget::evaluate`/`evaluate_with_alternatives` on its own grouping path (that call is reserved for the deferred diagnostic-escalation feature, §16) |
-| P2-REC-003 *(reworded, second repair pass)* | A `CapacityRejected` debounce-ring outcome increments a daemon-owned, bounded/saturating rejection counter (`saturating_add`, never itself unbounded) **and** writes one plain operational log line via the existing `eprintln!("[guardian-daemon] ...")` convention — both, always, never a choice between them, and never silently dropped |
+| P2-REC-003 *(reworded, second repair pass; ownership split corrected, Gate 2a implementation-repair pass, 2026-09-06)* | A `CapacityRejected` debounce-ring outcome increments a bounded/saturating rejection counter (`saturating_add`, never itself unbounded) **and** results in one plain operational log line via the existing `eprintln!("[guardian-daemon] ...")` convention — both, always, never a choice between them, and never silently dropped. **Ownership is split by gate, not undivided:** `guardian-core`'s `CorrelationEngine::reject_capacity()` (Gate 2a, closed) performs the counter increment and returns the typed `CapacityRejected{capability_id, rejection_count}` value with zero I/O; `crates/guardian-daemon/src/bin/guardian-daemon.rs` (Gate 2b) performs the actual `eprintln!` log write when it consumes that value. `guardian-core` must never perform the daemon-shaped I/O itself — see §7's corrected text above |
 | P2-REC-004 *(new)* | Under a storm of many distinct new debounce candidate keys at capacity, only new candidates are rejected; existing tracked candidates' state and progress are provably unaffected |
 | P2-REC-005 *(new, second repair pass)* | A `CapacityRejected` outcome never constructs or feeds an `Event` into `CorrelationIngress` or any other correlation input path — under a sustained storm of many distinct new debounce-candidate keys past capacity, the number of `CorrelationIngress`-admitted events is provably bounded by the real event producers alone, never inflated by the count of `CapacityRejected` outcomes themselves |
 | P2-API-001 | `Incidents1.ListIncidents()` returns real, live incidents once the correlation engine is wired in, with lossless `IncidentWire`/`guardian_client::Incident` round-tripping (already proven by existing G9 tests; this ID requires it hold with non-empty data) |
