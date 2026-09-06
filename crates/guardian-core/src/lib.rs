@@ -3,6 +3,7 @@
 pub mod arbitration;
 pub mod authorization;
 pub mod budget;
+pub mod correlation;
 pub mod error;
 pub mod event;
 pub mod identity;
