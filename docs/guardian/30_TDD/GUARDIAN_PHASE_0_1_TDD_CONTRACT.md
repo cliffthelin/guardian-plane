@@ -2527,3 +2527,390 @@ what any successor candidate must also satisfy; the bar itself is not
 weakened to accommodate a specific candidate's shortcoming. The
 candidate is replaced, or the Provider Arbitrator is extended under its
 own gate discipline first, as the specific failure requires.
+
+---
+
+# 51. Amendment — TDD-contract Phase 2 planning charter (read-only observability & correlation)
+
+- Status: Accepted (planning only — no production implementation
+  authorized by this section)
+- Date: 2026-09-05
+- Clarifies and narrows §47's own scope for implementation purposes.
+  Does not rename, renumber, or relocate §47 or §50. Preserves both
+  unchanged above, per AGENTS.md's "supersede, don't hide" rule.
+
+## Context
+
+§47 authorizes "TDD-contract Phase 2" — read-only observability and
+correlation — once Phase 1's exit criteria (§46) are satisfied. §46 is
+satisfied (G0–G9 all independently accepted, tagged, and pushed; see the
+TDD Gate Index). §50 subsequently proved that §47's scope and Wave 1's
+scope are independent and non-colliding, and reserved the `P2-*` ID
+family exclusively for whatever TDD-contract Phase 2 implementation
+eventually does — precisely so that reservation would mean something
+concrete once this planning pass actually derived it.
+
+Unlike Wave 1, §47's original text does not conflict with the work
+requested here: a planning pass deriving TDD-contract Phase 2's exact
+scope, correlation model, persistence decisions, and normative IDs *is*
+"read-only observability and correlation" work, not a different
+architecture requiring a bridging amendment the way Wave 1's production
+mutation did. **§47 alone is sufficient authorization to begin this
+planning pass; no governance conflict exists.** This section does not
+re-authorize Phase 2 — it records the mechanically-derived scope
+decisions this planning pass made, so they bind future implementation
+work the same way §50 recorded Wave 1's decisions, rather than leaving
+them only in a handoff document a future gate could silently reinterpret.
+
+## Decision
+
+TDD-contract Phase 2, as scoped by this planning pass, is exactly:
+
+1. A deterministic, in-process **correlation engine** (Layer 1, pure
+   Rust) that groups `Event`s into G3 `Incident`s under a fixed,
+   replayable policy — no new field is added to `Incident` in this
+   phase (see "Severity/wire disposition" below); no new field is added
+   to `Event` either, except where §5 of the implementation handoff
+   below identifies a real boundary.
+2. Wiring that engine into `guardian-daemon`'s existing monitoring tick
+   so `Incidents1.ListIncidents()` (already-shipped, currently
+   hard-coded empty per the G9 handoff §6.1) returns real, live data —
+   no new D-Bus interface, no new object path, no change to the frozen
+   `Guardian1` contract.
+3. Provider-health-transition correlation and PSI-event correlation
+   (already produced by G8's `providers::psi` wiring) into that same
+   Incident model — "correlated with," never "caused by." **Correction
+   (repair pass, see revision history):** provider-health transitions
+   are not "already produced" today in event form — `guardian-daemon`'s
+   `capability_registry_tick` returns `CapabilityRecord` snapshots only;
+   no `Event` of any kind is emitted for a Health/Availability change.
+   This phase's scope therefore includes producing a provider-health
+   transition `Event` from successive snapshot diffs, not merely
+   detecting one that already exists.
+4. Bounded, in-memory-only retention for both the correlation engine's
+   working state and any incident history it produces in this phase
+   (§7/§8 of the implementation handoff), subordinate to G5's Diagnostic
+   Budget Manager and consistent with G5's own FC-1/FC-2 disclosed,
+   still-open gaps — this phase does not close either.
+5. **A new, engine-owned correlation-ingress ordering model** (added by
+   this repair pass; see "Correlation-ingress ordering model" below) —
+   required because the two real production event producers'
+   `timestamp_monotonic` values are not mutually comparable.
+
+TDD-contract Phase 2, as scoped by this planning pass, explicitly
+excludes (deferred, not silently dropped):
+
+- `Transactions1` population (Wave 1 transaction-record observability)
+  — the helper-private/daemon-state separation this would need to cross
+  is a distinct architectural decision this planning pass declines to
+  make unilaterally; see the implementation handoff §12.
+- Byte-bounded Flight Recorder limits, persistent spill, incident
+  persistence, or event persistence across daemon restart/reboot — G5's
+  FC-1 and FC-2 remain open exactly as G5 left them; this phase adds a
+  correlation *engine*, not a persistence layer.
+- **Incident severity of any kind** (added by this repair pass; see
+  "Severity/wire disposition" below) — deferred in full for this phase.
+- Any new privileged read (journald excepted — G2 already classifies
+  journald read as `no privilege`; this phase may use it if a future
+  implementation pass finds a concrete correlation need, but does not
+  mandate it).
+- Diagnostic-escalation-from-incident (§16 of the research below) —
+  identified as a real future capability, not required for this phase's
+  exit criteria.
+- Master-spec Phase 2 (I/O Guardian), Wave 1 hardening backlog
+  (`JobRemoved` prefilter, rollback race fixture, listener-thread
+  instrumentation), and any new mutation capability of any kind — all
+  remain exactly as separately gated as before this amendment.
+
+This section authorizes normative-ID reservation and documentation
+production only. Actual implementation remains gated behind a future,
+separately-assigned implementation pass reading
+`GUARDIAN_PHASE2_IMPLEMENTATION_HANDOFF.md`, exactly as every prior gate
+required its own implementation handoff before code was written.
+
+## Correlation-ingress ordering model (added by repair pass, 2026-09-05)
+
+An independent review found the original planning pass's correlation
+model unsound: it proposed sorting events by `timestamp_monotonic` for
+grouping/windowing, but the two real, already-production event
+producers populate that field incompatibly. `guardian-daemon.rs`'s
+`monitoring_tick` sets it from `now_secs()` — literal wall-clock
+`SystemTime::now()` seconds-since-epoch (~10⁹ range, can jump backward
+on NTP correction, exactly what `Event::timestamp_monotonic`'s own doc
+comment forbids using it for). `providers/psi.rs`'s
+`event_from_crossing` sets it from `ThresholdMonitor`'s own per-instance
+`sequence` counter, starting near 0, unrelated to any clock. These two
+domains are not comparable; sorting a merged stream by
+`timestamp_monotonic` does not reflect real temporal order across
+producers.
+
+**Binding resolution.** Neither producer is touched — `now_secs()` and
+`ThresholdMonitor::sequence` are existing, accepted, unmodified
+production code, out of scope for a docs-only repair regardless. Instead,
+the correlation engine owns a new, single, daemon-owned ingress clock:
+
+- A conceptual envelope, e.g. `CorrelationIngress { event: Event,
+  ingress_clock: Instant, ingress_sequence: u64 }` (exact naming not
+  binding; semantics are), constructed by `guardian-daemon` at the
+  single point where every event source (PSI, the daemon-tick producer,
+  and the new provider-health producer) feeds into the correlation
+  engine.
+- `ingress_clock` is a `std::time::Instant`-based reading from one
+  daemon-process-local clock; `ingress_sequence` is a strictly
+  increasing `u64` counter, incremented once per event admitted,
+  serving as the total-order tie-breaker even when two ingress readings
+  tie at `Instant` resolution.
+- All correlation grouping, windowing, and ordering is defined over this
+  ingress order (`ingress_clock` primary, `ingress_sequence`
+  tie-break) — **never** over any producer's own `timestamp_monotonic`.
+  Each event's original `timestamp_monotonic`/`timestamp_wall` remains
+  recorded and displayable as **provenance only** ("what the source
+  claimed"), never consulted for a correlation decision.
+- **Restart-epoch semantics**: the ingress clock and sequence counter
+  are process-local and reset on every `guardian-daemon` restart — no
+  persistence, consistent with this phase's existing memory-only
+  decision (§8/§9 of the implementation handoff). Ordering guarantees
+  hold only within one daemon process lifetime; a restart begins a new
+  ingress epoch at sequence 0, exactly as incidents themselves do not
+  survive restart (§9).
+- This mechanism makes PSI's, the daemon-tick's, and the new
+  provider-health producer's events comparable at the moment of
+  ingress, even though their own internal `timestamp_monotonic` fields
+  never were and remain unrelated to each other after ingress.
+
+## Severity/wire disposition (added by repair pass, 2026-09-05)
+
+An independent review found the original planning pass's incident/wire
+proposal self-contradictory: it proposed adding a `severity: Risk` field
+to `Incident` while claiming, in one section, that the shipped
+`IncidentWire` D-Bus wire shape (a positional 7-tuple,
+`crates/guardian-daemon/src/dbus_surface.rs`, independently duplicated
+in `crates/guardian-client/src/lib.rs`) "stays frozen," while its own
+file-impact list elsewhere required updating that exact wire-conversion
+code — directly contradictory. It also silently reopened G3's own
+deliberately-deferred NB-3 note (`docs/evidence/g3/G3_MILESTONE.md`:
+`Risk` has `Display`/`wire_token()` but no `FromStr`, so it cannot
+round-trip through a wire string; NB-3's disposition assigns closure to
+"whichever gate first needs to reconstruct a `Risk` value from a
+serialized representation," which wire-visible severity would be)
+without ever citing or closing it. Separately, `Incident::link_event`
+(`crates/guardian-core/src/incident.rs`) takes only an `EventId`, never
+an `Event` or its `Risk` — so "severity = max linked-event `Risk`,
+recomputed on `link_event`" was not implementable under the signature
+the same proposal described as "reused unmodified."
+
+**Binding resolution.**
+
+- **Incident severity is deferred in full for TDD-contract Phase 2.** No
+  `severity` field is added to `Incident` in this phase.
+- **`IncidentWire`'s positional 7-tuple stays completely unchanged** — no
+  new field, no shape change, no version negotiation, because nothing
+  about the wire shape changes in this phase.
+- **`Incident::link_event(&mut self, event_id: EventId)`'s signature
+  stays completely unchanged** — since severity is deferred, there is no
+  need to give it access to event severity data.
+- **G3's NB-3 note remains explicitly open.** This phase does not close
+  it and does not pretend it does not apply — it plainly does not
+  trigger it, because severity is deferred. Whichever future gate
+  actually adds wire-visible `Risk` reconstruction (the scenario NB-3's
+  disposition names) must resolve NB-3 at that time, not assume it is
+  already resolved by this phase's existence.
+- **What the confidence-cap/`Hypothesis` mechanism (§4.3 of the
+  implementation handoff) actually needs**: nothing new. §4.3's
+  cross-source correlation rule already caps the derived incident's
+  existing `confidence: Confidence` field at `Hypothesis` — `Confidence`
+  is an existing `Incident` field (G3), unrelated to `Risk`/severity.
+  This planning pass finds no severity-like concept is required for
+  Phase 2's correlation rules once severity itself is deferred; the
+  count/kind of an incident's linked events remains observable via the
+  existing `event_ids: Vec<EventId>` field for any future consumer that
+  wants a lightweight signal, with no new field added for it in this
+  phase.
+
+## Debounce-bound eviction policy (added by repair pass, 2026-09-05)
+
+An independent review found §7 of the implementation handoff described
+three bounded/FIFO structures, not two: an open-incident cap (eviction
+force-closes the oldest — safe), a closed-incident ring (eviction drops
+old history — safe), and a third, unheadlined "recent but not yet
+incident-worthy" debounce/dwell bookkeeping ring for provider-health
+flapping detection, itself capacity-bounded with oldest-eviction. The
+original text never specified what happens when *this* ring evicts an
+in-progress, not-yet-incident-worthy key under a many-distinct-key event
+storm — worse than truncation, since a real sustained transition could
+be silently forgotten with no forced closure and no evidence note.
+
+**Binding resolution.** The debounce/dwell bookkeeping ring **never
+evicts an active tracked candidate to admit a new key.** At capacity, a
+brand-new candidate key is rejected outright with a typed, bounded
+`CapacityRejected`-style outcome (exact conceptual shape: a typed
+result/error variant returned to the caller, not a silently-dropped
+return value). Existing tracked candidates are never disturbed by a
+storm of new distinct keys; only entirely-new candidates can be
+rejected.
+
+**Corrected (second repair pass, 2026-09-05).** A second, comprehensive
+combined architecture-and-scope review found the first repair pass's
+"as a normal Guardian event of its own, or at minimum a documented
+internal counter/log line" text an unresolved disjunction, not a
+decision — a future implementer could pick either branch and both would
+technically satisfy the wording, and the "emit it as a Guardian event"
+branch was never checked for recursive overflow: a `CapacityRejected`
+outcome emitted as an ordinary `Event` fed back into the very
+`CorrelationIngress`/open-incident-cap machinery the debounce ring
+exists to protect would let a genuine many-distinct-key storm (exactly
+the scenario the ring exists to survive) generate a rejection-event per
+rejected key, itself becoming correlation-ingress pressure, itself
+capable of pressuring the open-incident cap — an unanalyzed cascade.
+**The disjunction is retired. The sole binding mechanism is:**
+
+- A `CapacityRejected` outcome increments a daemon-owned, bounded/
+  saturating rejection counter (a plain `u64` or similar, incremented
+  with `saturating_add`, never itself unbounded).
+- A `CapacityRejected` outcome also writes one plain operational log
+  line via `guardian-daemon`'s existing `eprintln!("[guardian-daemon]
+  ...")` convention — the same mechanism already used for every other
+  operational log line in `crates/guardian-daemon/src/bin/
+  guardian-daemon.rs` (e.g. the monitoring-tick and capability-registry-
+  tick lines) — no new logging crate (`tracing`, `log`, etc.) is
+  introduced, because none exists anywhere in the workspace today.
+- **By rule, a `CapacityRejected` outcome DOES NOT construct or feed
+  another `Event` into `CorrelationIngress` or any other correlation
+  input path.** This is not a style preference; it is the specific
+  provision that forecloses the recursive-overflow risk above, and it
+  is independently testable (`P2-REC-005`, implementation handoff §19).
+
+This mechanism is stated once, identically, in the implementation
+handoff's §7, §18, and `P2-REC-003`'s own normative text, and the
+independent-review handoff's corresponding audit instruction is revised
+to check for this exact, singular mechanism rather than "one of the
+disjunctive options."
+
+## Disambiguation (restated, per §50's binding rule)
+
+This section adds no fourth meaning. "TDD-contract Phase 2" continues to
+mean exactly §47's read-only observability/correlation expansion, now
+concretely scoped by this section rather than left as one paragraph.
+"Master-spec Phase 2" and "Wave 1" are unaffected and unchanged.
+
+## Consequences
+
+`P2-*` normative IDs (families: `P2-EVT-*`, `P2-COR-*`, `P2-INC-*`,
+`P2-REC-*`, `P2-API-*`, `P2-VM-*` — provider-health and PSI correlation
+rules both live under `P2-COR-*` rather than each minting a separate
+family, per the implementation handoff §19's actual ID list) now have a real
+scope to attach to, closing the reservation §50 made. No prior gate's
+acceptance, tag, or evidence is altered. `Incidents1` remains the
+existing, frozen wire shape (`IncidentWire`/`guardian_client::Incident`)
+— this phase is required to populate it, not redesign it, unless
+implementation finds a genuine boundary (see the independent-review
+handoff for what would count as one). Per this repair pass: that frozen
+shape now has no exception pending (severity is deferred, not merely
+un-wired); `Incident`/`link_event` are confirmed unchanged; the
+correlation-ingress ordering model is the sole ordering mechanism for
+implementation to build; and the debounce ring's reject-not-evict policy
+replaces the eviction policy this section originally implied applied
+uniformly to all three bounded structures. Per the second repair pass:
+the debounce ring's `CapacityRejected` observability mechanism is now a
+single, non-disjunctive rule (bounded/saturating counter + existing
+`eprintln!` log line, with an explicit, independently-testable
+`P2-REC-005` rule that it never re-enters `CorrelationIngress`), closing
+the recursive-overflow risk a comprehensive combined review identified
+in the first repair pass's wording.
+
+## Revision history
+
+- 2026-09-05, initial: recorded the scope decisions made during
+  TDD-contract Phase 2 planning, per §47's own authorization and this
+  contract's AGENTS.md-derived documentation discipline.
+- 2026-09-05, repair pass (this one): an independent review of the
+  planning candidate, verified against real production source (not the
+  planning report's own paraphrase), found two blocking defects and
+  three non-blocking gaps, all resolved here rather than re-litigated:
+  (1) the correlation model's proposed `timestamp_monotonic` sort was
+  unsound because `guardian-daemon.rs`'s `now_secs()` (wall-clock
+  seconds) and `providers/psi.rs`'s `ThresholdMonitor::sequence`
+  (per-instance counter) are not mutually comparable — resolved by the
+  new "Correlation-ingress ordering model" above: a daemon-owned,
+  restart-scoped `Instant` + strictly-increasing sequence total order,
+  with every producer's own `timestamp_monotonic` demoted to
+  provenance-only, never used for correlation decisions; (2) the
+  incident/wire proposal was self-contradictory (claimed `IncidentWire`
+  "stays frozen" while also listing it as work to update) and silently
+  reopened G3's NB-3 note without citing it, and its `severity`
+  recomputation-on-`link_event` policy was not implementable against
+  `link_event(EventId)`'s real signature — resolved by the new
+  "Severity/wire disposition" above: severity deferred in full for this
+  phase, `IncidentWire`/`link_event` both genuinely unchanged, NB-3 left
+  explicitly open (not closed, not ignored); (3) §7's third,
+  unheadlined debounce/dwell bookkeeping ring had no specified behavior
+  for evicting an in-progress candidate under a many-distinct-key storm
+  — resolved by the new "Debounce-bound eviction policy" above: reject
+  new candidates at capacity via a typed `CapacityRejected` outcome,
+  recorded observably, never evict an existing tracked candidate; (4)
+  this section's and the implementation handoff's FC-N citations were
+  unqualified by gate, conflating G4's own FC-3 with G5's own, separate
+  FC-1/FC-2 series as if one continuous list — corrected throughout to
+  cite "G4's FC-3" / "G5's FC-1"/"G5's FC-2" explicitly, verified against
+  `docs/evidence/g4/G4_MILESTONE.md` and `docs/evidence/g5/
+  G5_MILESTONE.md` directly; (5) this section's decision item 3
+  described provider-health-transition production as "already produced,"
+  when `guardian-daemon.rs`'s `capability_registry_tick` in fact returns
+  `CapabilityRecord` snapshots only — no `Event` of any kind is emitted
+  for a Health/Availability change today — corrected in decision item 3
+  above. No prior gate's acceptance, tag, or evidence is altered by this
+  repair; only this planning candidate's own text is corrected, the same
+  "supersede, don't hide" way §50 was revised in place six times.
+- 2026-09-05, second repair pass (this one): a second, comprehensive
+  combined architecture-and-scope review found the planning almost
+  entirely sound but returned one blocking verdict — "DEBOUNCE CAPACITY
+  SEMANTICS UNSAFE" — plus five cheap, non-blocking items, all resolved
+  here rather than re-litigating anything already cleared. **Blocking
+  defect**: the first repair pass's `CapacityRejected` observability
+  text ("as a normal Guardian event of its own, or at minimum a
+  documented internal counter/log line") was an unresolved disjunction,
+  not a decision, and its "emit it as a Guardian event" branch was never
+  checked for recursive overflow — a rejection-event fed back into
+  `CorrelationIngress` could itself become correlation-ingress pressure
+  during exactly the many-distinct-key storm the debounce ring exists to
+  survive. Resolved by retiring the disjunction: the sole binding
+  mechanism is now a bounded/saturating rejection counter plus one
+  `eprintln!("[guardian-daemon] ...")` log line (the daemon's existing,
+  only logging convention — no `tracing`/`log` crate exists in this
+  workspace), with an explicit, independently-testable rule
+  (`P2-REC-005`) that a `CapacityRejected` outcome never constructs or
+  feeds an `Event` into `CorrelationIngress` or any other correlation
+  input path. **Five non-blocking items**, all resolved in the
+  implementation handoff: (a) the §4.1/§18 window-definition
+  inconsistency (duration vs. sequence tie-breaker) reconciled — window
+  boundaries are `Instant`+`Duration` constructions, `ingress_sequence`
+  breaks ties only; (b) the `Instant`-construction test technique
+  (`base = Instant::now()` at test start, then `base + Duration::
+  from_millis(N)` / `checked_sub` for synthetic placement) now stated
+  explicitly, since `Instant` has no public arbitrary-value constructor;
+  (c) an internal Gate 2a/2b/2c decomposition added to the
+  implementation handoff's §20, sequencing the pure-Rust correlation
+  engine, the provider-health producer plus daemon wiring, and VM
+  evidence into three internally-gated steps; (d) generic
+  capability-health-transition correlation is now explicitly marked
+  REQUIRED FOUNDATION, and each source's richer, source-specific
+  semantics (UDisks2 device identity, logind inhibitor detail, UPower
+  battery/AC detail, AccountsService session specifics) explicitly
+  marked OPTIONAL FUTURE ENRICHMENT, not part of this gate sequence; (e)
+  a new normative ID (`P2-API-003`) requires a regression test locking
+  `IncidentWire`'s exact current 7-field positional-tuple shape. No
+  prior gate's acceptance, tag, or evidence is altered by this repair;
+  no item already cleared by the second review (ingress-ordering model,
+  provenance-only timestamps, severity/wire deferral, restart/epoch
+  semantics, the other two bounded structures, FC-N citations,
+  provider-health scope-honesty, the normative-ID inventory's internal
+  consistency, or the scope-completeness judgment) is re-litigated here.
+
+## Rollback / migration implications
+
+If Phase 2 implementation later finds this scope wrong or incomplete in
+a way that changes an architectural boundary stated here (e.g.
+transaction observability turns out to be required, not deferrable),
+that finding amends this section explicitly, the same way §50 was
+revised in place six times — it does not silently expand scope inside
+an implementation handoff alone.
