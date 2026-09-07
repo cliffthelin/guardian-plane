@@ -167,6 +167,23 @@ open, to establish the mechanism.
   fresh-snapshot pattern `phase2_2b_contract.rs` now uses.
   **Status**: open.
 
+### From Phase 2 Gate 2c evidence/governance repair
+
+- **Source gate**: Phase 2 Gate 2c (evidence/governance repair; noted
+  during this repair, not fixed by it — out of this repair's scope)
+  **Finding**: every Phase 2 gate manifest's `status` field
+  (`phase2-2a-*`, `phase2-2b-*`, `phase2-2c-manifest.toml`) still reads
+  `"not-started"` even though each of those gates is actually closed/
+  accepted or, in Gate 2c's case, in active repair — the field is never
+  updated on closure anywhere in the Phase 2 manifest set.
+  **Why non-blocking**: purely a stale metadata field; no gate's actual
+  scope, evidence, or validation gating reads or depends on this value,
+  so it does not affect what any gate proves or enforces.
+  **Revisit trigger/phase**: a future pass that either wires `status`
+  updates into gate-closure procedure or removes the field if it is not
+  meant to be load-bearing.
+  **Status**: open.
+
 ## Rule
 
 Do not perform a giant historical backlog migration in a single pass.
