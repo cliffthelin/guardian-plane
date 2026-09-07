@@ -2,7 +2,7 @@
 title: "Gate 2b TDD — provider-health producer, daemon wiring, D-Bus population"
 kind: "gate-tdd"
 status: "active"
-last_reviewed: "2026-09-06"
+last_reviewed: "2026-09-07"
 ---
 # Gate 2b TDD
 
@@ -33,12 +33,30 @@ ENRICHMENT, out of this gate.
 **R2 — Single daemon-owned `CorrelationIngress` admission point.**
 Requirement: `guardian-daemon`'s monitoring tick constructs one
 `IngressClock`/`CorrelationIngress` admission point that every event
-source (PSI, the existing daemon-tick producer, and this gate's new
-provider-health producer) feeds through — no producer constructs its own
-ingress clock or sequence.
-Evidence: a test/observation showing all three sources' events pass
-through the one admission point and receive monotonically increasing
-`ingress_sequence` values regardless of source.
+source actually producing events in `guardian-daemon` today — the
+existing daemon-tick producer and this gate's new provider-health
+producer — feeds through; no producer constructs its own ingress clock
+or sequence. PSI is not a live event producer in `guardian-daemon` as of
+this gate (confirmed: no production PSI event-generation loop exists
+outside a standalone example) — this gate does not add one, since no
+owned `P2-API-*` ID requires it and doing so would be scope creep beyond
+R1's "required foundation only" framing. The single-admission-point
+design is PSI-compatible: a future gate that wires a live PSI producer
+must feed it through this same `IngressClock`/`CorrelationIngress`
+point, not a separate one, but standing that producer up is not this
+gate's work.
+Evidence: a test/observation showing both currently-live sources'
+events pass through the one admission point and receive monotonically
+increasing `ingress_sequence` values regardless of source.
+
+*Process note, recorded per this gate's own review:* when a Contract
+Collision Table (per `GUARDIAN_EXECUTION_PROTOCOL.md`) surfaces a real
+conflict like this one (TDD text presupposing a producer that doesn't
+exist in production), the protocol's existing stop-and-report rule
+governs — resolve it by stopping and reporting, not by adjudicating it
+unilaterally inside the implementation. This TDD correction is the
+result of that conflict being raised after the fact; future gates
+should raise it before editing.
 
 **R3 — `Incidents1.ListIncidents()` returns live data.**
 Requirement: `dbus_surface.rs`'s `Incidents1::list_incidents` reads the

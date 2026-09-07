@@ -49,6 +49,26 @@
 //! It does **not** claim FC-2 closed: no real spill/retention sink exists
 //! yet for either policy branch. See the module doc on
 //! [`monitoring_tick`].
+//!
+//! **Phase 2 Gate 2b update**: this binary now also owns the single
+//! daemon-wide `guardian_core::correlation::IngressClock`/
+//! `CorrelationEngine` admission point (gate TDD R2) — every event source
+//! this binary produces (the existing monitoring-tick producer, and the
+//! new provider-health snapshot-diff producer) feeds through it, never
+//! constructing its own ingress clock/sequence. The debounce ring's
+//! `CapacityRejected` outcome (Gate 2a, `guardian-core`, zero I/O there by
+//! design) is logged here — the daemon-owned half of `P2-REC-003` — using
+//! this file's existing `eprintln!("[guardian-daemon] ...")` convention,
+//! never a new logging facility. `guardian-daemon`'s live PSI event
+//! production (real kernel `poll()`-triggered events,
+//! `guardian_core::providers::psi::PsiEventSource`) is **not** added by
+//! this gate: no such production loop exists anywhere in this binary
+//! today (it exists only as a library capability plus a standalone
+//! evidence example, `crates/guardian-core/examples/
+//! g8_psi_trigger_evidence.rs`), Gate 2b's own R7 only conditionally
+//! requires PSI-specific glue code ("if daemon wiring adds any..."), and
+//! no `P2-*` ID this gate owns requires it — wiring a real PSI production
+//! thread into this process remains a future gate's scope.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -56,7 +76,11 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use guardian_core::budget::{self, FreeSpaceState};
+use guardian_core::correlation::{
+    AdmitOutcome, CorrelationEngine, CorrelationPolicy, IngressClock,
+};
 use guardian_core::event::Event;
+use guardian_core::providers::health::HealthTransitionProducer;
 use guardian_core::providers::udisks::{TopologyTracker, UdisksProvider};
 use guardian_core::recorder::BoundedRecorder;
 use guardian_core::risk::Risk;
@@ -105,6 +129,29 @@ fn humantime_wall() -> String {
     format!("{}s-since-epoch", now_secs())
 }
 
+/// The single daemon-owned `CorrelationIngress` admission point (gate TDD
+/// R2): every event source this binary produces calls this and only this
+/// function to reach the correlation engine — no producer constructs its
+/// own `IngressClock`/sequence. The daemon-side half of `P2-REC-003`
+/// (Gate 2a already performs the zero-I/O library half, `guardian-core`'s
+/// `CorrelationEngine::reject_capacity()`) lives here: a `CapacityRejected`
+/// outcome produces exactly one operational log line, using this file's
+/// existing `eprintln!("[guardian-daemon] ...")` convention.
+fn admit_event(
+    ingress_clock: &Mutex<IngressClock>,
+    engine: &Mutex<CorrelationEngine>,
+    event: Event,
+) {
+    let ingress = ingress_clock.lock().unwrap().admit(event);
+    let result = engine.lock().unwrap().admit(&ingress);
+    if let AdmitOutcome::CapacityRejected(rejected) = &result.outcome {
+        eprintln!(
+            "[guardian-daemon] correlation debounce ring at capacity: rejected new candidate capability_id={} (rejection_count={})",
+            rejected.capability_id, rejected.rejection_count
+        );
+    }
+}
+
 /// Genuine, no-privilege, Class C periodic monitoring work (G7 handoff
 /// §2.4: "the recorder is a Class C/monitoring concern and lives in
 /// `guardian-daemon`"). Every tick: probes real free space, calls G5's
@@ -124,7 +171,12 @@ fn humantime_wall() -> String {
 /// assigned to the first gate that instantiates an actual spill/retention
 /// path (see `docs/evidence/g7/G7_DAEMON_HELPER_EVIDENCE.md`'s corrected
 /// disposition).
-fn monitoring_tick(recorder: &Mutex<BoundedRecorder>, state: &Path) {
+fn monitoring_tick(
+    recorder: &Mutex<BoundedRecorder>,
+    state: &Path,
+    ingress_clock: &Mutex<IngressClock>,
+    engine: &Mutex<CorrelationEngine>,
+) {
     let free_space = probe_free_space(state);
     let policy = budget::recorder_policy_for(free_space);
 
@@ -141,6 +193,11 @@ fn monitoring_tick(recorder: &Mutex<BoundedRecorder>, state: &Path) {
         raw_reference: event_type.to_owned(),
         attributes: std::collections::BTreeMap::new(),
     };
+
+    // The same Event already produced for the recorder also feeds the
+    // one shared correlation-ingress admission point (gate TDD R2) — no
+    // second provider read, no second event construction.
+    admit_event(ingress_clock, engine, event.clone());
 
     let mut guard = recorder.lock().unwrap();
     guard.record(event);
@@ -159,7 +216,12 @@ fn monitoring_tick(recorder: &Mutex<BoundedRecorder>, state: &Path) {
 /// assigns that to G9, when a real consumer exists). One provider being
 /// unreachable never stops the others: [`guardian_core::providers::
 /// registry::populate_registry`] treats each of the six independently.
-fn capability_registry_tick(connection: &zbus::Connection) -> Vec<CapabilityRecord> {
+fn capability_registry_tick(
+    connection: &zbus::Connection,
+    health_producer: &mut HealthTransitionProducer,
+    ingress_clock: &Mutex<IngressClock>,
+    engine: &Mutex<CorrelationEngine>,
+) -> Vec<CapabilityRecord> {
     let records = async_io::block_on(guardian_core::providers::registry::populate_registry(
         connection,
     ));
@@ -171,6 +233,16 @@ fn capability_registry_tick(connection: &zbus::Connection) -> Vec<CapabilityReco
         "[guardian-daemon] capability registry tick: {available}/{} capabilities available",
         records.len()
     );
+
+    // Gate 2b's new provider-health transition producer (gate TDD R1):
+    // diffs this snapshot against the previous one and feeds any
+    // resulting Events through the one shared ingress point (R2) — no
+    // new provider read is performed here beyond the snapshot already
+    // collected above.
+    for event in health_producer.observe(&records) {
+        admit_event(ingress_clock, engine, event);
+    }
+
     records
 }
 
@@ -188,11 +260,28 @@ fn main() -> zbus::Result<()> {
     let recorder = std::sync::Arc::new(Mutex::new(
         BoundedRecorder::new(RECORDER_CAPACITY).expect("fixed positive capacity"),
     ));
+
+    // Phase 2 Gate 2b: the single daemon-owned `CorrelationIngress`
+    // admission point (gate TDD R2) — every event source below feeds
+    // through this one `IngressClock`/`CorrelationEngine` pair, never
+    // constructing its own.
+    let ingress_clock = std::sync::Arc::new(Mutex::new(IngressClock::new()));
+    let engine = std::sync::Arc::new(Mutex::new(CorrelationEngine::new(
+        CorrelationPolicy::default(),
+    )));
+
     let recorder_for_thread = std::sync::Arc::clone(&recorder);
     let state_for_thread = state.clone();
+    let ingress_clock_for_monitoring = std::sync::Arc::clone(&ingress_clock);
+    let engine_for_monitoring = std::sync::Arc::clone(&engine);
     std::thread::spawn(move || {
         loop {
-            monitoring_tick(&recorder_for_thread, &state_for_thread);
+            monitoring_tick(
+                &recorder_for_thread,
+                &state_for_thread,
+                &ingress_clock_for_monitoring,
+                &engine_for_monitoring,
+            );
             std::thread::sleep(MONITORING_TICK_INTERVAL);
         }
     });
@@ -204,8 +293,11 @@ fn main() -> zbus::Result<()> {
     // daemon's own served object.
     let registry_snapshot = std::sync::Arc::new(Mutex::new(Vec::<CapabilityRecord>::new()));
     let registry_snapshot_for_thread = std::sync::Arc::clone(&registry_snapshot);
+    let ingress_clock_for_registry = std::sync::Arc::clone(&ingress_clock);
+    let engine_for_registry = std::sync::Arc::clone(&engine);
     std::thread::spawn(move || {
         let mut topology_tracker = TopologyTracker::new();
+        let mut health_producer = HealthTransitionProducer::new();
         loop {
             // Reconnect each bounded cycle. A missing bus or a connection
             // lost since the previous cycle therefore cannot permanently
@@ -214,7 +306,12 @@ fn main() -> zbus::Result<()> {
                 Ok(registry_connection) => {
                     replace_registry_snapshot(
                         &registry_snapshot_for_thread,
-                        capability_registry_tick(&registry_connection),
+                        capability_registry_tick(
+                            &registry_connection,
+                            &mut health_producer,
+                            &ingress_clock_for_registry,
+                            &engine_for_registry,
+                        ),
                     );
                     if let Ok(topology) =
                         async_io::block_on(UdisksProvider::new(&registry_connection).topology())
@@ -249,7 +346,7 @@ fn main() -> zbus::Result<()> {
         )?
         .serve_at(
             dbus_surface::INCIDENTS_OBJECT_PATH,
-            dbus_surface::Incidents1,
+            dbus_surface::Incidents1::new(std::sync::Arc::clone(&engine)),
         )?
         .serve_at(
             dbus_surface::TRANSACTIONS_OBJECT_PATH,
@@ -267,9 +364,16 @@ fn main() -> zbus::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{monitoring_tick, probe_free_space, replace_registry_snapshot};
+    use super::{admit_event, monitoring_tick, probe_free_space, replace_registry_snapshot};
     use guardian_core::budget::FreeSpaceState;
+    use guardian_core::correlation::{
+        CorrelationEngine, CorrelationPolicy, HEALTH_AVAILABILITY_TO_ATTR,
+        HEALTH_CAPABILITY_ID_ATTR, HEALTH_TRANSITION_EVENT_TYPE, IngressClock,
+    };
+    use guardian_core::event::Event;
     use guardian_core::recorder::BoundedRecorder;
+    use guardian_core::risk::Risk;
+    use guardian_provider_api::{EventId, ProviderId};
     use std::sync::Mutex;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -280,6 +384,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn shared_ingress() -> (Mutex<IngressClock>, Mutex<CorrelationEngine>) {
+        (
+            Mutex::new(IngressClock::new()),
+            Mutex::new(CorrelationEngine::new(CorrelationPolicy::default())),
+        )
     }
 
     #[test]
@@ -299,9 +410,10 @@ mod tests {
     fn monitoring_tick_records_a_real_event_and_does_not_panic() {
         let dir = temp_dir("tick-records-event");
         let recorder = Mutex::new(BoundedRecorder::new(4).unwrap());
-        monitoring_tick(&recorder, &dir);
+        let (ingress_clock, engine) = shared_ingress();
+        monitoring_tick(&recorder, &dir, &ingress_clock, &engine);
         assert_eq!(recorder.lock().unwrap().len(), 1);
-        monitoring_tick(&recorder, &dir);
+        monitoring_tick(&recorder, &dir, &ingress_clock, &engine);
         assert_eq!(recorder.lock().unwrap().len(), 2);
     }
 
@@ -309,8 +421,9 @@ mod tests {
     fn monitoring_tick_respects_the_recorder_bound_across_many_ticks() {
         let dir = temp_dir("tick-bounded");
         let recorder = Mutex::new(BoundedRecorder::new(2).unwrap());
+        let (ingress_clock, engine) = shared_ingress();
         for _ in 0..5 {
-            monitoring_tick(&recorder, &dir);
+            monitoring_tick(&recorder, &dir, &ingress_clock, &engine);
         }
         let guard = recorder.lock().unwrap();
         assert_eq!(guard.len(), 2, "must never exceed the configured capacity");
@@ -321,6 +434,97 @@ mod tests {
         );
     }
 
+    /// Gate TDD R2 evidence: every source feeding `admit_event` — here,
+    /// several `monitoring_tick` calls plus a directly-admitted
+    /// provider-health event — receives strictly increasing
+    /// `ingress_sequence` values from the one shared admission point,
+    /// regardless of which source produced the event.
+    #[test]
+    fn monitoring_tick_and_a_second_source_share_one_monotonically_increasing_ingress_sequence() {
+        let dir = temp_dir("tick-shared-ingress");
+        let recorder = Mutex::new(BoundedRecorder::new(8).unwrap());
+        let (ingress_clock, engine) = shared_ingress();
+
+        monitoring_tick(&recorder, &dir, &ingress_clock, &engine);
+        assert_eq!(ingress_clock.lock().unwrap().sequence(), 1);
+
+        let health_event = sample_health_event(0, "available");
+        admit_event(&ingress_clock, &engine, health_event);
+        assert_eq!(
+            ingress_clock.lock().unwrap().sequence(),
+            2,
+            "a second source admitted through the same point must continue the same sequence"
+        );
+
+        monitoring_tick(&recorder, &dir, &ingress_clock, &engine);
+        assert_eq!(
+            ingress_clock.lock().unwrap().sequence(),
+            3,
+            "ingress_sequence keeps increasing regardless of which source produced the event"
+        );
+    }
+
+    /// Gate TDD R6 / `P2-REC-003` daemon-side half: a `CapacityRejected`
+    /// outcome consumed by `admit_event` does not panic and the engine's
+    /// own rejection counter increments — the log line itself is asserted
+    /// indirectly here (this test proves the outcome is real and handled,
+    /// not silently dropped); the exact log text is documented at the
+    /// `admit_event` call site.
+    #[test]
+    fn admit_event_handles_a_capacity_rejected_outcome_without_panicking() {
+        let ingress_clock = Mutex::new(IngressClock::new());
+        let policy = CorrelationPolicy {
+            debounce_capacity: 1,
+            ..CorrelationPolicy::default()
+        };
+        let engine = Mutex::new(CorrelationEngine::new(policy));
+
+        admit_event(
+            &ingress_clock,
+            &engine,
+            sample_health_event(0, "unavailable"),
+        );
+        admit_event(
+            &ingress_clock,
+            &engine,
+            sample_health_event_for("b.cap", 1, "unavailable"),
+        );
+
+        assert_eq!(
+            engine.lock().unwrap().rejection_count(),
+            1,
+            "the second, brand-new candidate key must be rejected once the ring is at capacity"
+        );
+    }
+
+    fn sample_health_event(sequence: u64, availability_to: &str) -> Event {
+        sample_health_event_for("a.cap", sequence, availability_to)
+    }
+
+    fn sample_health_event_for(capability_id: &str, sequence: u64, availability_to: &str) -> Event {
+        let mut attributes = std::collections::BTreeMap::new();
+        attributes.insert(
+            HEALTH_CAPABILITY_ID_ATTR.to_owned(),
+            capability_id.to_owned(),
+        );
+        attributes.insert(
+            HEALTH_AVAILABILITY_TO_ATTR.to_owned(),
+            availability_to.to_owned(),
+        );
+        Event {
+            event_id: EventId::new(format!("guardian.health.test.event-{sequence}")).unwrap(),
+            timestamp_monotonic: sequence,
+            timestamp_wall: format!("sequence-{sequence}"),
+            source_provider: ProviderId::new("guardian.p2.capability-health").unwrap(),
+            event_type: HEALTH_TRANSITION_EVENT_TYPE.to_owned(),
+            resource_refs: vec![capability_id.to_owned()],
+            severity: Risk::Observe,
+            normalized_key: guardian_core::event::normalize_key("test"),
+            raw_reference: "test".to_owned(),
+            attributes,
+        }
+    }
+
     #[test]
     fn registry_snapshot_is_replaced_not_retained_after_outage() {
         let snapshot = Mutex::new(vec![
@@ -328,5 +532,25 @@ mod tests {
         ]);
         replace_registry_snapshot(&snapshot, Vec::new());
         assert!(snapshot.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn admit_outcome_ignored_for_unrecognized_event_type_still_advances_ingress() {
+        // A "daemon_monitoring_tick" event matches no correlation rule
+        // (`AdmitOutcome::Ignored`) but must still have been admitted
+        // through the one shared point -- this is what proves the
+        // daemon-tick producer is a real ingress source, not merely
+        // recorder-only.
+        let (ingress_clock, engine) = shared_ingress();
+        let dir = temp_dir("ignored-still-advances");
+        let recorder = Mutex::new(BoundedRecorder::new(4).unwrap());
+        monitoring_tick(&recorder, &dir, &ingress_clock, &engine);
+        let engine_guard = engine.lock().unwrap();
+        assert_eq!(engine_guard.admitted_ingress_count(), 1);
+        assert_eq!(
+            engine_guard.open_incidents().len(),
+            0,
+            "a daemon-tick event never opens an incident on its own"
+        );
     }
 }

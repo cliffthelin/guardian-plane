@@ -30,6 +30,7 @@ dependencies = ["phase2-2a"]
 paths = [
     "crates/guardian-daemon/**",
     "crates/guardian-core/src/providers/**",
+    "docs/evidence/p2/**",
 ]
 
 [forbidden_scope]

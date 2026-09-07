@@ -6,6 +6,7 @@
 //! module's own doc comment for the specific normative prohibition.
 
 pub mod accounts;
+pub mod health;
 pub mod logind;
 pub mod psi;
 pub mod registry;

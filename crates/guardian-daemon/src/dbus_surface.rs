@@ -12,17 +12,31 @@
 //! CapabilityRecord`, `guardian_core::incident::Incident`,
 //! `guardian_core::transaction::record::TransactionRecord`) — no new
 //! capability, incident, or transaction logic exists in this module.
-//! `Incidents1`/`Transactions1` genuinely, honestly return an empty list
-//! in this gate: no production code anywhere constructs a real
-//! `Incident`, and `guardian-daemon` itself holds no transaction store
-//! (the only transaction persistence in this workspace is
-//! `guardian-helper`'s, under `root:root` ownership). Populating either
-//! list by reading `guardian-helper`'s state directory, or by adding any
-//! new `guardian-daemon` -> `GuardianHelper1` call, is explicitly
-//! forbidden — see the G9 implementation handoff §6.1 for the reasoning.
+//! `Transactions1` genuinely, honestly returns an empty list in this
+//! gate: `guardian-daemon` itself holds no transaction store (the only
+//! transaction persistence in this workspace is `guardian-helper`'s,
+//! under `root:root` ownership). Populating it by reading
+//! `guardian-helper`'s state directory, or by adding any new
+//! `guardian-daemon` -> `GuardianHelper1` call, is explicitly forbidden —
+//! see the G9 implementation handoff §6.1 for the reasoning.
+//!
+//! **Phase 2 Gate 2b update**: `Incidents1::list_incidents` is no longer
+//! genuinely, honestly empty — a real incident producer now exists
+//! (`guardian_core::providers::health::HealthTransitionProducer`, wired
+//! through the daemon-owned `guardian_core::correlation::
+//! CorrelationEngine` in `crates/guardian-daemon/src/bin/
+//! guardian-daemon.rs`), so this interface reads that engine's live,
+//! in-memory incident store instead of returning `Vec::new()`. The
+//! previous doc comment's "no incident producer exists" claim was true
+//! at G9 and is corrected here to match reality (gate TDD R3), following
+//! this project's own G8/G9 precedent of correcting doc comments that
+//! drift from what the code actually does rather than leaving them
+//! stale.
 
 use std::sync::{Arc, Mutex};
 
+use guardian_core::correlation::CorrelationEngine;
+use guardian_core::incident::{Confidence, Incident, IncidentStatus};
 use guardian_core::providers::logind::LogindProvider;
 use guardian_core::providers::psi::PsiFileSource;
 use guardian_core::psi::{PsiReading, PsiResourceKind};
@@ -224,19 +238,78 @@ pub fn to_blocker_wire(inhibitor: &guardian_core::providers::logind::Inhibitor) 
     )
 }
 
-/// Genuinely empty in this gate — see this module's doc comment. Kept as
-/// a real, live query (not a hardcoded constant baked into a client) so a
-/// future gate that adds a real incident producer needs no interface
-/// change, only a populated backing store.
-pub struct Incidents1;
+/// Phase 2 Gate 2b: a real, live query over the daemon-owned
+/// `CorrelationEngine`'s in-memory incident store — no interface change
+/// from G9's shape, exactly the "populated backing store" this type's
+/// original doc comment anticipated.
+pub struct Incidents1 {
+    engine: Arc<Mutex<CorrelationEngine>>,
+}
 
+impl Incidents1 {
+    #[must_use]
+    pub const fn new(engine: Arc<Mutex<CorrelationEngine>>) -> Self {
+        Self { engine }
+    }
+}
+
+/// `(incident_id, opened_at, closed_at, status, summary, confidence,
+/// primary_resource)` — frozen per TDD contract §51 ("Severity/wire
+/// disposition") and the G9 implementation handoff §15/§20; Gate 2b
+/// populates this list, it does not change its shape (locked by
+/// `incident_wire_shape_is_locked_to_seven_string_fields` below,
+/// `P2-API-003`).
 pub type IncidentWire = (String, String, String, String, String, String, String);
+
+fn incident_status_wire(status: IncidentStatus) -> &'static str {
+    match status {
+        IncidentStatus::Open => "open",
+        IncidentStatus::Monitoring => "monitoring",
+        IncidentStatus::Closed => "closed",
+        IncidentStatus::Unknown => "unknown",
+    }
+}
+
+fn confidence_wire(confidence: Confidence) -> &'static str {
+    match confidence {
+        Confidence::Hypothesis => "hypothesis",
+        Confidence::Probable => "probable",
+        Confidence::Confirmed => "confirmed",
+        Confidence::Unknown => "unknown",
+    }
+}
+
+/// Pure, Layer-1-testable projection — no D-Bus involved. Lossless over
+/// every field `IncidentWire` carries; severity remains deferred in full
+/// (§51) and is not part of this tuple.
+#[must_use]
+pub fn to_incident_wire(incident: &Incident) -> IncidentWire {
+    (
+        incident.incident_id.to_string(),
+        incident.opened_at.clone(),
+        incident.closed_at.clone().unwrap_or_default(),
+        incident_status_wire(incident.status).to_owned(),
+        incident.summary.clone(),
+        confidence_wire(incident.confidence).to_owned(),
+        incident.primary_resource.clone().unwrap_or_default(),
+    )
+}
 
 #[zbus::interface(name = "io.github.cliffthelin.Guardian.Incidents1")]
 impl Incidents1 {
-    #[allow(clippy::unused_self)] // required receiver for a zbus::interface method
+    /// Real, live serialization of the daemon-owned correlation engine's
+    /// current incident store — both still-open and already-closed
+    /// incidents (gate TDD R3); no new incident logic exists in this
+    /// module, only the same lossless wire projection every other
+    /// interface here uses.
     fn list_incidents(&self) -> Vec<IncidentWire> {
-        Vec::new()
+        let engine = self.engine.lock().unwrap();
+        let open = engine.open_incidents();
+        let closed = engine.closed_incidents();
+        open.iter()
+            .chain(closed.iter())
+            .map(to_incident_wire)
+            .collect()
     }
 }
 
@@ -326,13 +399,188 @@ mod tests {
         assert_eq!(wire.2, "1.2.3");
     }
 
+    /// Gate TDD R3 / `P2-API-001`: with no incident ever admitted, the
+    /// engine's store is genuinely empty and `list_incidents` reflects
+    /// that honestly -- not a stale G9 assumption baked into the type,
+    /// but the real, currently-true state of an empty, freshly-built
+    /// engine.
     #[test]
-    fn incidents_list_is_genuinely_empty_not_fabricated() {
-        let incidents = Incidents1;
-        // No D-Bus involved; this asserts the pure invariant this type
-        // exists to guarantee -- a future producer changes this test,
-        // not a client-side assumption.
-        let _ = incidents; // constructible with no arguments: no hidden store
+    fn incidents_list_is_empty_for_a_freshly_built_engine_with_no_admitted_events() {
+        let engine = Arc::new(Mutex::new(CorrelationEngine::new(
+            guardian_core::correlation::CorrelationPolicy::default(),
+        )));
+        let incidents = Incidents1::new(engine);
+        assert!(incidents.list_incidents().is_empty());
+    }
+
+    /// Gate TDD R3 / `P2-API-001`: once the engine has genuinely opened an
+    /// incident (via a real health-transition event admitted through the
+    /// same `CorrelationIngress` mechanism every other source uses),
+    /// `list_incidents` returns it, correctly and losslessly round-tripped
+    /// through `IncidentWire`.
+    #[test]
+    fn incidents_list_reflects_a_real_incident_the_engine_actually_opened() {
+        use guardian_core::correlation::{CorrelationPolicy, IngressClock};
+        use guardian_core::event::{Event, normalize_key};
+        use guardian_provider_api::EventId;
+        use std::time::Instant;
+
+        let mut ingress_clock = IngressClock::new();
+        let policy = CorrelationPolicy::default();
+        let min_dwell = policy.health_min_dwell;
+        let mut engine_value = CorrelationEngine::new(policy);
+        let base = Instant::now();
+
+        let make_event = |sequence: u64| Event {
+            event_id: EventId::new(format!("guardian.health.test.event-{sequence}")).unwrap(),
+            timestamp_monotonic: sequence,
+            timestamp_wall: format!("sequence-{sequence}"),
+            source_provider: ProviderId::new("guardian.p2.capability-health").unwrap(),
+            event_type: guardian_core::correlation::HEALTH_TRANSITION_EVENT_TYPE.to_owned(),
+            resource_refs: vec!["systemd.unit.state".to_owned()],
+            severity: guardian_core::risk::Risk::High,
+            normalized_key: normalize_key("test"),
+            raw_reference: "capability systemd.unit.state health transition to unavailable"
+                .to_owned(),
+            attributes: [
+                (
+                    guardian_core::correlation::HEALTH_CAPABILITY_ID_ATTR.to_owned(),
+                    "systemd.unit.state".to_owned(),
+                ),
+                (
+                    guardian_core::correlation::HEALTH_AVAILABILITY_TO_ATTR.to_owned(),
+                    "unavailable".to_owned(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        // The debounce/dwell rule (§4.2) means the FIRST `Bad` reading for
+        // a brand-new key only seeds the debounce ring
+        // (`AdmitOutcome::DebouncePending`); a second `Bad` reading after
+        // `health_min_dwell` has elapsed is what actually opens the
+        // incident -- exercising the real engine logic here, not a
+        // simplified stand-in for it.
+        let first = ingress_clock.admit_at(make_event(1), base);
+        engine_value.admit(&first);
+        let second = ingress_clock.admit_at(make_event(2), base + min_dwell);
+        engine_value.admit(&second);
+
+        let engine = Arc::new(Mutex::new(engine_value));
+        let incidents = Incidents1::new(engine);
+        let wires = incidents.list_incidents();
+        assert_eq!(
+            wires.len(),
+            1,
+            "the real admitted transition must open exactly one incident"
+        );
+        let wire = &wires[0];
+        assert_eq!(wire.3, "open");
+        assert_eq!(wire.6, "systemd.unit.state");
+        assert_eq!(wire.5, "confirmed");
+    }
+
+    /// `P2-API-003`: `IncidentWire`'s shape (a 7-field positional tuple of
+    /// `String`s) is locked. This test exists purely to fail to compile
+    /// -- not merely fail at runtime -- the moment `IncidentWire`'s
+    /// arity, field order, or field type changes, per the gate's own
+    /// regression-guard requirement. Manually perturbing the tuple shape
+    /// (e.g. dropping a field or changing one to a non-`String` type)
+    /// during development and observing this test stop compiling was
+    /// the throwaway local check that proves this guard actually locks
+    /// the shape; it is not re-run automatically since perturbing
+    /// `IncidentWire` itself is forbidden scope for this gate.
+    #[test]
+    fn incident_wire_shape_is_locked_to_a_seven_field_string_tuple() {
+        let wire: IncidentWire = (
+            "incident-id".to_owned(),
+            "opened-at".to_owned(),
+            "closed-at".to_owned(),
+            "status".to_owned(),
+            "summary".to_owned(),
+            "confidence".to_owned(),
+            "primary-resource".to_owned(),
+        );
+        let (incident_id, opened_at, closed_at, status, summary, confidence, primary_resource): (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = wire;
+        assert_eq!(incident_id, "incident-id");
+        assert_eq!(opened_at, "opened-at");
+        assert_eq!(closed_at, "closed-at");
+        assert_eq!(status, "status");
+        assert_eq!(summary, "summary");
+        assert_eq!(confidence, "confidence");
+        assert_eq!(primary_resource, "primary-resource");
+    }
+
+    #[test]
+    fn to_incident_wire_preserves_every_field_losslessly() {
+        let incident = Incident {
+            incident_id: guardian_provider_api::IncidentId::new(
+                "guardian.correlation.incident-000001",
+            )
+            .unwrap(),
+            opened_at: "ingress-3".to_owned(),
+            closed_at: Some("ingress-9".to_owned()),
+            status: IncidentStatus::Closed,
+            summary: "capability systemd.unit.state debounced transition".to_owned(),
+            confidence: Confidence::Confirmed,
+            confidence_history: Vec::new(),
+            primary_resource: Some("systemd.unit.state".to_owned()),
+            event_ids: Vec::new(),
+            evidence: Vec::new(),
+            candidate_causes: Vec::new(),
+            recommended_actions: Vec::new(),
+            transaction_ids: Vec::new(),
+            outcome: Some("debounced recovery to Available".to_owned()),
+        };
+        let wire = to_incident_wire(&incident);
+        assert_eq!(wire.0, "guardian.correlation.incident-000001");
+        assert_eq!(wire.1, "ingress-3");
+        assert_eq!(wire.2, "ingress-9");
+        assert_eq!(wire.3, "closed");
+        assert_eq!(wire.4, "capability systemd.unit.state debounced transition");
+        assert_eq!(wire.5, "confirmed");
+        assert_eq!(wire.6, "systemd.unit.state");
+    }
+
+    #[test]
+    fn to_incident_wire_never_panics_on_a_still_open_incident_with_no_close_fields() {
+        let incident = Incident {
+            incident_id: guardian_provider_api::IncidentId::new(
+                "guardian.correlation.incident-000002",
+            )
+            .unwrap(),
+            opened_at: "ingress-0".to_owned(),
+            closed_at: None,
+            status: IncidentStatus::Open,
+            summary: "PSI critical pressure for /proc/pressure/cpu".to_owned(),
+            confidence: Confidence::Confirmed,
+            confidence_history: Vec::new(),
+            primary_resource: None,
+            event_ids: Vec::new(),
+            evidence: Vec::new(),
+            candidate_causes: Vec::new(),
+            recommended_actions: Vec::new(),
+            transaction_ids: Vec::new(),
+            outcome: None,
+        };
+        let wire = to_incident_wire(&incident);
+        assert_eq!(
+            wire.2, "",
+            "no closed_at must round-trip as empty, not panic"
+        );
+        assert_eq!(
+            wire.6, "",
+            "no primary_resource must round-trip as empty, not panic"
+        );
     }
 
     #[test]
