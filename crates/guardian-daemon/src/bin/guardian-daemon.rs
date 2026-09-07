@@ -77,7 +77,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use guardian_core::budget::{self, FreeSpaceState};
 use guardian_core::correlation::{
-    AdmitOutcome, CorrelationEngine, CorrelationPolicy, IngressClock,
+    AdmitOutcome, CorrelationEngine, CorrelationPolicy, FreshHealthObservation, IngressClock,
 };
 use guardian_core::event::Event;
 use guardian_core::providers::health::HealthTransitionProducer;
@@ -243,7 +243,49 @@ fn capability_registry_tick(
         admit_event(ingress_clock, engine, event);
     }
 
+    // Gate 2b health-lifecycle integration repair R2: after admitting any
+    // real diff-driven Events above, also advance Gate 2a's
+    // fresh-observation dwell-promotion path once per capability in this
+    // same fresh snapshot — no second provider/registry read, no
+    // fabricated Event.
+    advance_health_dwell_for_snapshot(&records, ingress_clock, engine);
+
     records
+}
+
+/// Gate 2b health-lifecycle integration repair R2: calls
+/// [`guardian_core::correlation::CorrelationEngine::advance_health_dwell`]
+/// once per [`CapabilityRecord`] in `records` — the same fresh snapshot
+/// [`capability_registry_tick`] already collected, immediately after
+/// admitting any real diff-driven `Event`s from it. Every call in one
+/// invocation of this function shares a single `(Instant::now(),
+/// IngressClock::sequence())` ingress-order pair, captured once here
+/// (not once per capability), per the gate TDD's "one tick, one fresh
+/// observation" framing. `advance_health_dwell` is a documented no-op
+/// (`AdmitOutcome::Ignored`) for any `capability_id` with no pending
+/// debounce candidate, so calling it unconditionally for every record in
+/// the snapshot is safe: a capability absent from this snapshot is
+/// simply not called this tick (never treated as an implicit `Good` or
+/// `Bad`), and a capability present but unresolved
+/// ([`FreshHealthObservation::Unresolved`]) never falsely advances a
+/// pending candidate (Gate 2a's own invariant, consumed here unmodified).
+fn advance_health_dwell_for_snapshot(
+    records: &[CapabilityRecord],
+    ingress_clock: &Mutex<IngressClock>,
+    engine: &Mutex<CorrelationEngine>,
+) {
+    let ingress_instant = std::time::Instant::now();
+    let ingress_sequence = ingress_clock.lock().unwrap().sequence();
+    let mut engine_guard = engine.lock().unwrap();
+    for record in records {
+        let observation = FreshHealthObservation::classify(record.availability, record.health);
+        engine_guard.advance_health_dwell(
+            &record.capability_id,
+            observation,
+            ingress_instant,
+            ingress_sequence,
+        );
+    }
 }
 
 fn replace_registry_snapshot(
@@ -364,16 +406,23 @@ fn main() -> zbus::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{admit_event, monitoring_tick, probe_free_space, replace_registry_snapshot};
+    use super::{
+        admit_event, advance_health_dwell_for_snapshot, monitoring_tick, probe_free_space,
+        replace_registry_snapshot,
+    };
     use guardian_core::budget::FreeSpaceState;
     use guardian_core::correlation::{
-        CorrelationEngine, CorrelationPolicy, HEALTH_AVAILABILITY_TO_ATTR,
+        AdmitOutcome, CorrelationEngine, CorrelationPolicy, HEALTH_AVAILABILITY_TO_ATTR,
         HEALTH_CAPABILITY_ID_ATTR, HEALTH_TRANSITION_EVENT_TYPE, IngressClock,
     };
     use guardian_core::event::Event;
+    use guardian_core::providers::health::HealthTransitionProducer;
     use guardian_core::recorder::BoundedRecorder;
     use guardian_core::risk::Risk;
-    use guardian_provider_api::{EventId, ProviderId};
+    use guardian_provider_api::{
+        Availability, BootAvailability, CapabilityId, CapabilityRecord, DiagnosticCost, EventId,
+        Health, InterfaceKind, Knowledge, PrivilegeRequirement, ProviderId,
+    };
     use std::sync::Mutex;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -551,6 +600,148 @@ mod tests {
             engine_guard.open_incidents().len(),
             0,
             "a daemon-tick event never opens an incident on its own"
+        );
+    }
+
+    fn capability_record(
+        cap_id: &str,
+        availability: Availability,
+        health: Health,
+    ) -> CapabilityRecord {
+        CapabilityRecord {
+            capability_id: CapabilityId::new(cap_id).unwrap(),
+            provider_id: ProviderId::new("guardian.g8.test").unwrap(),
+            provider_version: None,
+            availability,
+            health,
+            read_support: true,
+            write_support: false,
+            authorization_ownership: Knowledge::Unknown,
+            privilege_requirement: PrivilegeRequirement::NoDirectPrivilege,
+            boot_availability: [BootAvailability::SystemBus].into_iter().collect(),
+            interface_kind: InterfaceKind::DBus,
+            interface_name: None,
+            interface_hash: None,
+            diagnostic_cost: DiagnosticCost::default(),
+            last_observed_at: "2026-09-06T00:00:00Z".to_owned(),
+        }
+    }
+
+    /// Gate TDD R2(a): a capability that goes bad and stays bad across
+    /// enough fresh-snapshot ticks to satisfy `health_min_dwell` opens
+    /// exactly one incident via `advance_health_dwell_for_snapshot` alone
+    /// -- no second `Event` is ever constructed for the unchanged-bad
+    /// snapshot.
+    #[test]
+    fn sustained_bad_across_fresh_snapshots_opens_exactly_one_incident_with_no_second_event() {
+        let (ingress_clock, engine) = shared_ingress();
+        let mut health_producer = HealthTransitionProducer::new();
+
+        let baseline = vec![capability_record(
+            "systemd.unit.state",
+            Availability::Available,
+            Health::Healthy,
+        )];
+        assert!(health_producer.observe(&baseline).is_empty());
+
+        let bad = vec![capability_record(
+            "systemd.unit.state",
+            Availability::Unavailable,
+            Health::Error,
+        )];
+        let events = health_producer.observe(&bad);
+        assert_eq!(events.len(), 1, "the real diff must emit exactly one Event");
+        for event in events {
+            admit_event(&ingress_clock, &engine, event);
+        }
+        advance_health_dwell_for_snapshot(&bad, &ingress_clock, &engine);
+        assert_eq!(
+            engine.lock().unwrap().open_incidents().len(),
+            0,
+            "the first Bad reading only seeds the debounce ring"
+        );
+
+        // A later, unchanged-still-bad fresh snapshot: the producer stays
+        // edge-triggered (zero new Events); the dwell-advance call is what
+        // must do the promotion once real time has elapsed.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let still_bad_events = health_producer.observe(&bad);
+        assert!(
+            still_bad_events.is_empty(),
+            "an unchanged snapshot pair must emit no Event"
+        );
+
+        // Force the debounce candidate's dwell to have elapsed by driving
+        // `advance_health_dwell` directly with an ingress instant beyond
+        // `health_min_dwell` -- exactly what a later real tick would
+        // naturally supply given enough wall-clock time between ticks.
+        let capability_id = CapabilityId::new("systemd.unit.state").unwrap();
+        let observation = guardian_core::correlation::FreshHealthObservation::classify(
+            bad[0].availability,
+            bad[0].health,
+        );
+        let dwell = CorrelationPolicy::default().health_min_dwell;
+        let base = std::time::Instant::now();
+        let outcome = engine.lock().unwrap().advance_health_dwell(
+            &capability_id,
+            observation,
+            base + dwell,
+            ingress_clock.lock().unwrap().sequence(),
+        );
+        assert!(
+            matches!(outcome.outcome, AdmitOutcome::IncidentOpened(_)),
+            "fresh-observation advancement alone must open exactly one incident once dwell elapses"
+        );
+        assert_eq!(engine.lock().unwrap().open_incidents().len(), 1);
+
+        // A further call for the same, now-open capability must never
+        // open a second incident (R2(b): unaffected once there is no
+        // pending candidate left to advance).
+        advance_health_dwell_for_snapshot(&bad, &ingress_clock, &engine);
+        assert_eq!(
+            engine.lock().unwrap().open_incidents().len(),
+            1,
+            "a capability with no pending candidate must be unaffected by being called every tick"
+        );
+    }
+
+    /// Gate TDD R2(c): a capability that disappears from one tick's
+    /// snapshot entirely must not have its pending candidate promoted on
+    /// that tick -- `advance_health_dwell_for_snapshot` only calls
+    /// `advance_health_dwell` for capabilities actually present in the
+    /// snapshot it is given.
+    #[test]
+    fn a_capability_absent_from_a_snapshot_is_not_promoted_that_tick() {
+        let (ingress_clock, engine) = shared_ingress();
+        let mut health_producer = HealthTransitionProducer::new();
+
+        let baseline = vec![capability_record(
+            "systemd.unit.state",
+            Availability::Available,
+            Health::Healthy,
+        )];
+        assert!(health_producer.observe(&baseline).is_empty());
+
+        let bad = vec![capability_record(
+            "systemd.unit.state",
+            Availability::Unavailable,
+            Health::Error,
+        )];
+        let events = health_producer.observe(&bad);
+        for event in events {
+            admit_event(&ingress_clock, &engine, event);
+        }
+        assert_eq!(engine.lock().unwrap().open_incidents().len(), 0);
+
+        // A fresh snapshot in which "systemd.unit.state" is entirely
+        // absent -- e.g. its provider became unreachable this tick. Must
+        // not promote the pending candidate.
+        let snapshot_without_it: Vec<CapabilityRecord> = Vec::new();
+        advance_health_dwell_for_snapshot(&snapshot_without_it, &ingress_clock, &engine);
+        assert_eq!(
+            engine.lock().unwrap().open_incidents().len(),
+            0,
+            "a capability absent from this tick's snapshot must not be promoted this tick"
         );
     }
 }

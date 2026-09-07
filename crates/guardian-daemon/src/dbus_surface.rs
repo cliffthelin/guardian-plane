@@ -447,9 +447,25 @@ mod tests {
                     guardian_core::correlation::HEALTH_CAPABILITY_ID_ATTR.to_owned(),
                     "systemd.unit.state".to_owned(),
                 ),
+                // Gate 2b health-lifecycle integration repair R1: a real
+                // production Event carries complete four-field
+                // provenance, not just the target pair -- this fixture
+                // now mirrors that (a genuine Available->Unavailable
+                // transition) so the engine's real
+                // `transition_confidence()` rule reaches
+                // `Confidence::Confirmed` rather than falling through to
+                // `Confidence::Unknown` for want of "from" provenance.
+                (
+                    guardian_core::correlation::HEALTH_AVAILABILITY_FROM_ATTR.to_owned(),
+                    "available".to_owned(),
+                ),
                 (
                     guardian_core::correlation::HEALTH_AVAILABILITY_TO_ATTR.to_owned(),
                     "unavailable".to_owned(),
+                ),
+                (
+                    guardian_core::correlation::HEALTH_HEALTH_FROM_ATTR.to_owned(),
+                    "healthy".to_owned(),
                 ),
             ]
             .into_iter()

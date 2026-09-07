@@ -22,10 +22,13 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use guardian_provider_api::{Availability, CapabilityId, CapabilityRecord, EventId, ProviderId};
+use guardian_provider_api::{
+    Availability, CapabilityId, CapabilityRecord, EventId, Health, ProviderId,
+};
 
 use crate::correlation::{
-    HEALTH_AVAILABILITY_TO_ATTR, HEALTH_CAPABILITY_ID_ATTR, HEALTH_TRANSITION_EVENT_TYPE,
+    HEALTH_AVAILABILITY_FROM_ATTR, HEALTH_AVAILABILITY_TO_ATTR, HEALTH_CAPABILITY_ID_ATTR,
+    HEALTH_HEALTH_FROM_ATTR, HEALTH_HEALTH_TO_ATTR, HEALTH_TRANSITION_EVENT_TYPE,
 };
 use crate::event::{Event, normalize_key};
 use crate::risk::Risk;
@@ -46,7 +49,7 @@ const HEALTH_PRODUCER_PROVIDER_ID: &str = "guardian.p2.capability-health";
 /// `PsiEventDispatcher::new` uses for its first reading.
 #[derive(Debug, Default)]
 pub struct HealthTransitionProducer {
-    previous: Option<HashMap<CapabilityId, (Availability, guardian_provider_api::Health)>>,
+    previous: Option<HashMap<CapabilityId, (Availability, Health)>>,
     sequence: u64,
 }
 
@@ -67,16 +70,15 @@ impl HealthTransitionProducer {
     /// "transition" (it becomes eligible starting with the snapshot after
     /// this one).
     pub fn observe(&mut self, current: &[CapabilityRecord]) -> Vec<Event> {
-        let current_state: HashMap<CapabilityId, (Availability, guardian_provider_api::Health)> =
-            current
-                .iter()
-                .map(|record| {
-                    (
-                        record.capability_id.clone(),
-                        (record.availability, record.health),
-                    )
-                })
-                .collect();
+        let current_state: HashMap<CapabilityId, (Availability, Health)> = current
+            .iter()
+            .map(|record| {
+                (
+                    record.capability_id.clone(),
+                    (record.availability, record.health),
+                )
+            })
+            .collect();
 
         let mut events = Vec::new();
         if let Some(previous_state) = &self.previous {
@@ -91,7 +93,14 @@ impl HealthTransitionProducer {
                     continue;
                 }
                 self.sequence = self.sequence.saturating_add(1);
-                events.push(transition_event(capability_id, availability, self.sequence));
+                events.push(transition_event(
+                    capability_id,
+                    prev_availability,
+                    prev_health,
+                    availability,
+                    health,
+                    self.sequence,
+                ));
             }
         }
 
@@ -100,9 +109,27 @@ impl HealthTransitionProducer {
     }
 }
 
+/// Constructs one real transition `Event`, carrying complete four-field
+/// provenance (Gate 2b health-lifecycle integration repair R1):
+/// `availability_from`/`health_from` (the prior snapshot's pair -- always
+/// real, observed state here, never inferred or defaulted, since
+/// [`HealthTransitionProducer::observe`] only ever calls this once a
+/// prior snapshot for this `capability_id` is already known) alongside
+/// the already-existing `availability_to`/`health_to` (the current
+/// snapshot's pair). No new provider I/O: both pairs already live on the
+/// two [`CapabilityRecord`] snapshots the caller already diffed. This is
+/// exactly the data Gate 2a's `classify()`/`transition_confidence()`
+/// (`crates/guardian-core/src/correlation.rs`, unmodified by this
+/// repair) already knows how to consume -- populating it here is what
+/// lets a real production transition reach its correctly governed
+/// `Confidence` tier instead of always falling through to `Unknown` for
+/// want of "from" provenance.
 fn transition_event(
     capability_id: &CapabilityId,
+    prev_availability: Availability,
+    prev_health: Health,
     availability: Availability,
+    health: Health,
     sequence: u64,
 ) -> Event {
     let raw = format!(
@@ -116,9 +143,15 @@ fn transition_event(
         capability_id.as_str().to_owned(),
     );
     attributes.insert(
+        HEALTH_AVAILABILITY_FROM_ATTR.to_owned(),
+        prev_availability.to_string(),
+    );
+    attributes.insert(
         HEALTH_AVAILABILITY_TO_ATTR.to_owned(),
         availability.to_string(),
     );
+    attributes.insert(HEALTH_HEALTH_FROM_ATTR.to_owned(), prev_health.to_string());
+    attributes.insert(HEALTH_HEALTH_TO_ATTR.to_owned(), health.to_string());
 
     Event {
         event_id: EventId::new(format!(
@@ -149,7 +182,7 @@ fn transition_event(
 mod tests {
     use super::*;
     use guardian_provider_api::{
-        BootAvailability, DiagnosticCost, Health, InterfaceKind, Knowledge, PrivilegeRequirement,
+        BootAvailability, DiagnosticCost, InterfaceKind, Knowledge, PrivilegeRequirement,
     };
 
     fn record(cap_id: &str, availability: Availability, health: Health) -> CapabilityRecord {
@@ -228,6 +261,17 @@ mod tests {
         );
         assert_eq!(event.attributes[HEALTH_AVAILABILITY_TO_ATTR], "unavailable");
         assert_eq!(event.resource_refs, ["systemd.unit.state"]);
+
+        // Gate 2b health-lifecycle integration repair R1: a real
+        // Available->Unavailable transition must carry complete four-field
+        // provenance -- the "from" pair (the real prior snapshot's state),
+        // never just the "to" pair -- so Gate 2a's
+        // `transition_confidence()` can reach `Confidence::Confirmed`
+        // rather than falling through to `Confidence::Unknown` for want of
+        // "from" provenance.
+        assert_eq!(event.attributes[HEALTH_AVAILABILITY_FROM_ATTR], "available");
+        assert_eq!(event.attributes[HEALTH_HEALTH_FROM_ATTR], "healthy");
+        assert_eq!(event.attributes[HEALTH_HEALTH_TO_ATTR], "error");
     }
 
     #[test]
@@ -247,6 +291,18 @@ mod tests {
         )];
         let events = producer.observe(&degraded_health);
         assert_eq!(events.len(), 1, "a Health-only diff must still emit");
+
+        // Gate 2b health-lifecycle integration repair R1: the
+        // Healthy->Warning row -- the other named transition Gate 2a's
+        // `transition_confidence()` recognizes (=> `Confidence::Probable`)
+        // -- must also carry complete four-field provenance, with
+        // `availability_from`/`availability_to` both `available` (an
+        // unchanged dimension is still real provenance, not omitted).
+        let event = &events[0];
+        assert_eq!(event.attributes[HEALTH_AVAILABILITY_FROM_ATTR], "available");
+        assert_eq!(event.attributes[HEALTH_AVAILABILITY_TO_ATTR], "available");
+        assert_eq!(event.attributes[HEALTH_HEALTH_FROM_ATTR], "healthy");
+        assert_eq!(event.attributes[HEALTH_HEALTH_TO_ATTR], "warning");
     }
 
     #[test]

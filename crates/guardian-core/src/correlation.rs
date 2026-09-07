@@ -114,6 +114,27 @@ pub const HEALTH_AVAILABILITY_TO_ATTR: &str = "availability_to";
 /// repair lands.
 pub const HEALTH_HEALTH_TO_ATTR: &str = "health_to";
 
+/// The attribute key a provider-health transition event carries the
+/// *source* [`Availability`] wire token under (Gate 2a transition-
+/// confidence repair, R1). Optional on the wire: the real production
+/// producer (`HealthTransitionProducer`, Gate 2b) does not yet emit this
+/// attribute (see this repair's TDD's "Downstream Gate 2b forward
+/// requirement" section) -- an event missing this attribute yields no
+/// "from" provenance for confidence purposes (`None`), which
+/// [`transition_confidence`] treats as `Confidence::Unknown`, never as a
+/// silently-assumed `Available` (R3). A test may set this attribute
+/// explicitly to exercise the transition-level confidence rule before
+/// Gate 2b's own producer repair lands.
+pub const HEALTH_AVAILABILITY_FROM_ATTR: &str = "availability_from";
+
+/// The attribute key a provider-health transition event carries the
+/// *source* [`Health`] wire token under (Gate 2a transition-confidence
+/// repair, R1). Same optionality/rationale as
+/// [`HEALTH_AVAILABILITY_FROM_ATTR`]: missing or unparseable yields
+/// `None`, which [`transition_confidence`] treats as `Confidence::Unknown`,
+/// never as a silently-assumed `Healthy` (R3).
+pub const HEALTH_HEALTH_FROM_ATTR: &str = "health_from";
+
 /// The correlation-ingress envelope (§6). Exact naming per the
 /// implementation handoff; semantics are binding. `ingress_clock`/
 /// `ingress_sequence` -- never `Event::timestamp_monotonic` -- define
@@ -368,6 +389,50 @@ fn health_direction(availability: Availability, health: Health) -> Option<Health
     }
 }
 
+/// Gate 2a transition-confidence repair (R1/R2/R3/R4): computes the
+/// [`Confidence`] tier for an actionable `Bad`-direction transition from
+/// complete four-field provenance -- `availability_from`,
+/// `availability_to`, `health_from`, `health_to` -- never from the
+/// destination pair alone. This is the exact rule binding §4.2 states,
+/// applied at the transition level:
+///
+/// ```text
+/// availability_from == Available && availability_to == Unavailable  => Confirmed
+/// health_from == Healthy && health_to == Warning                    => Probable
+/// any other actionable transition                                   => Unknown
+/// ```
+///
+/// `availability_from`/`health_from` are `Option` because real-production
+/// provenance may be entirely absent on the wire today (Gate 2b's own
+/// forward repair, not yet landed -- see this repair's TDD). Missing or
+/// unparseable "from" provenance is never silently treated as
+/// `Available`/`Healthy` (R3, mirroring AGENTS.md's "do not convert
+/// UNKNOWN into HEALTHY" applied to provenance completeness): `None`
+/// simply fails both named-transition checks and falls through to
+/// `Confidence::Unknown`, exactly like any other unauthorized transition.
+///
+/// State classification (`Good`/`Bad`/unresolved -- [`health_direction`])
+/// stays a separate function of the destination pair only (R2); this
+/// function is called only once state classification has already decided
+/// the transition is `Bad`, to determine which `Confidence` tier the
+/// `Bad` payload carries.
+fn transition_confidence(
+    availability_from: Option<Availability>,
+    availability_to: Availability,
+    health_from: Option<Health>,
+    health_to: Health,
+) -> Confidence {
+    if availability_from == Some(Availability::Available)
+        && availability_to == Availability::Unavailable
+    {
+        return Confidence::Confirmed;
+    }
+    if health_from == Some(Health::Healthy) && health_to == Health::Warning {
+        return Confidence::Probable;
+    }
+    Confidence::Unknown
+}
+
 #[derive(Debug)]
 struct DebounceCandidate {
     target: HealthDirection,
@@ -460,7 +525,37 @@ fn classify(event: &Event) -> Option<Classification> {
             .get(HEALTH_HEALTH_TO_ATTR)
             .and_then(|token| token.parse().ok())
             .unwrap_or(Health::Healthy);
-        let direction = health_direction(availability, health)?;
+        // Destination-only state classification (`Good`/`Bad`/
+        // unresolved) is unchanged (R2) -- `health_direction` still owns
+        // that decision, keyed on `(availability, health)` alone.
+        let state = health_direction(availability, health)?;
+        // Gate 2a transition-confidence repair (R1): a `Bad` direction's
+        // *Confidence* tier is now computed from complete four-field
+        // transition provenance, not inherited from `state`'s own
+        // destination-only payload. `availability_from`/`health_from` are
+        // optional on the wire today (Gate 2b's forward repair, not yet
+        // landed) -- absent or unparseable "from" provenance is `None`,
+        // which `transition_confidence` treats as `Confidence::Unknown`,
+        // never silently assumed `Available`/`Healthy` (R3).
+        let direction = match state {
+            HealthDirection::Good => HealthDirection::Good,
+            HealthDirection::Bad(_) => {
+                let availability_from: Option<Availability> = event
+                    .attributes
+                    .get(HEALTH_AVAILABILITY_FROM_ATTR)
+                    .and_then(|token| token.parse().ok());
+                let health_from: Option<Health> = event
+                    .attributes
+                    .get(HEALTH_HEALTH_FROM_ATTR)
+                    .and_then(|token| token.parse().ok());
+                HealthDirection::Bad(transition_confidence(
+                    availability_from,
+                    availability,
+                    health_from,
+                    health,
+                ))
+            }
+        };
         return Some(Classification::Health {
             capability_id,
             direction,

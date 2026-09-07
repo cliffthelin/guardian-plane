@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 
 use guardian_core::correlation::{
     AdmitOutcome, CorrelationEngine, CorrelationIngress, CorrelationPolicy, FreshHealthObservation,
-    HEALTH_HEALTH_TO_ATTR, HEALTH_TRANSITION_EVENT_TYPE, IngressClock,
+    HEALTH_AVAILABILITY_FROM_ATTR, HEALTH_HEALTH_FROM_ATTR, HEALTH_HEALTH_TO_ATTR,
+    HEALTH_TRANSITION_EVENT_TYPE, IngressClock,
 };
 use guardian_core::event::{Event, normalize_key};
 use guardian_core::incident::{Confidence, IncidentStatus};
@@ -96,6 +97,42 @@ fn health_event_with_health(
         HEALTH_HEALTH_TO_ATTR.to_owned(),
         health.wire_token().to_owned(),
     );
+    event
+}
+
+/// Gate 2a transition-confidence repair (R1/R3): like
+/// [`health_event_with_health`], but also carries the "from" half of the
+/// transition (`availability_from`/`health_from`) whenever the caller
+/// supplies it -- `None` leaves the corresponding attribute entirely
+/// absent from the event, exercising R3's missing-provenance rule. No
+/// real production producer emits these attributes yet (Gate 2b's own
+/// forward repair); this gate's own tests supply them directly to prove
+/// the transition-level confidence rule (§4.2), exactly as this file's
+/// other synthetic helpers already do for attributes no real producer
+/// emits verbatim yet.
+fn health_event_with_transition(
+    id: &str,
+    capability_id: &str,
+    availability_from: Option<Availability>,
+    availability_to: Availability,
+    health_from: Option<Health>,
+    health_to: Health,
+    raw_seq: u64,
+) -> Event {
+    let mut event =
+        health_event_with_health(id, capability_id, availability_to, health_to, raw_seq);
+    if let Some(from) = availability_from {
+        event.attributes.insert(
+            HEALTH_AVAILABILITY_FROM_ATTR.to_owned(),
+            from.wire_token().to_owned(),
+        );
+    }
+    if let Some(from) = health_from {
+        event.attributes.insert(
+            HEALTH_HEALTH_FROM_ATTR.to_owned(),
+            from.wire_token().to_owned(),
+        );
+    }
     event
 }
 
@@ -911,10 +948,12 @@ fn confidence_available_warning_opens_with_probable_confidence() {
     let capability_id = CapabilityId::new("org.warning.svc").unwrap();
 
     let r1 = engine.admit(&ingress(
-        health_event_with_health(
+        health_event_with_transition(
             "evt-warning-1",
             "org.warning.svc",
+            Some(Availability::Available),
             Availability::Available,
+            Some(Health::Healthy),
             Health::Warning,
             1,
         ),
@@ -940,8 +979,9 @@ fn confidence_available_warning_opens_with_probable_confidence() {
     assert_eq!(
         incident.confidence,
         Confidence::Probable,
-        "Healthy->Warning is §4.2's named Probable transition -- must \
-         open as Confidence::Probable, never a hardcoded Confirmed"
+        "Healthy->Warning (real from/to provenance) is §4.2's named \
+         Probable transition -- must open as Confidence::Probable, never \
+         a hardcoded/destination-only tier"
     );
 }
 
@@ -952,10 +992,13 @@ fn confidence_available_to_unavailable_opens_with_confirmed_confidence() {
     let capability_id = CapabilityId::new("org.unavailable.svc").unwrap();
 
     let r1 = engine.admit(&ingress(
-        health_event(
+        health_event_with_transition(
             "evt-unavail-1",
             "org.unavailable.svc",
+            Some(Availability::Available),
             Availability::Unavailable,
+            Some(Health::Healthy),
+            Health::Healthy,
             1,
         ),
         base,
@@ -980,7 +1023,345 @@ fn confidence_available_to_unavailable_opens_with_confirmed_confidence() {
     assert_eq!(
         incident.confidence,
         Confidence::Confirmed,
-        "Available->Unavailable is §4.2's named Confirmed transition"
+        "Available->Unavailable (real from/to provenance) is §4.2's \
+         named Confirmed transition"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Gate 2a transition-confidence repair (second, narrower reopening of
+// P2-COR-003) -- health_direction()/classify() previously derived
+// Confidence from the destination (Availability, Health) pair alone, so
+// several transitions §4.2 never authorized incorrectly inherited a
+// confidence tier from their destination classification. These tests
+// drive real four-field (`availability_from`, `availability_to`,
+// `health_from`, `health_to`) transition provenance and assert the
+// corrected, transition-level confidence rule directly -- see
+// docs/guardian/30_TDD/gates/phase2-2a-transition-confidence-repair-tdd.md.
+// ---------------------------------------------------------------------
+
+#[test]
+fn transition_confidence_degraded_to_unavailable_is_unknown_not_confirmed() {
+    let base = Instant::now();
+    let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+    let capability_id = CapabilityId::new("org.degraded-to-unavail.svc").unwrap();
+
+    let r1 = engine.admit(&ingress(
+        health_event_with_transition(
+            "evt-degraded-to-unavail-1",
+            "org.degraded-to-unavail.svc",
+            Some(Availability::Degraded),
+            Availability::Unavailable,
+            Some(Health::Healthy),
+            Health::Healthy,
+            1,
+        ),
+        base,
+        0,
+        0,
+    ));
+    assert!(matches!(r1.outcome, AdmitOutcome::DebouncePending));
+
+    let r2 = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Bad,
+        base + Duration::from_millis(500),
+        1,
+    );
+    assert!(matches!(r2.outcome, AdmitOutcome::IncidentOpened(_)));
+    let id = incident_id_of(&r2.outcome);
+    let incident = engine
+        .open_incidents()
+        .into_iter()
+        .find(|i| i.incident_id == id)
+        .unwrap();
+    assert_eq!(
+        incident.confidence,
+        Confidence::Unknown,
+        "Degraded->Unavailable is NOT §4.2's Available->Unavailable \
+         transition -- must open as Confidence::Unknown, never inherit \
+         Confirmed from the Unavailable destination alone (the exact \
+         defect this repair fixes)"
+    );
+}
+
+#[test]
+fn transition_confidence_unknown_to_unavailable_is_unknown_not_confirmed() {
+    let base = Instant::now();
+    let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+    let capability_id = CapabilityId::new("org.unknown-to-unavail.svc").unwrap();
+
+    let r1 = engine.admit(&ingress(
+        health_event_with_transition(
+            "evt-unknown-to-unavail-1",
+            "org.unknown-to-unavail.svc",
+            Some(Availability::Unknown),
+            Availability::Unavailable,
+            Some(Health::Healthy),
+            Health::Healthy,
+            1,
+        ),
+        base,
+        0,
+        0,
+    ));
+    assert!(matches!(r1.outcome, AdmitOutcome::DebouncePending));
+
+    let r2 = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Bad,
+        base + Duration::from_millis(500),
+        1,
+    );
+    assert!(matches!(r2.outcome, AdmitOutcome::IncidentOpened(_)));
+    let id = incident_id_of(&r2.outcome);
+    let incident = engine
+        .open_incidents()
+        .into_iter()
+        .find(|i| i.incident_id == id)
+        .unwrap();
+    assert_eq!(
+        incident.confidence,
+        Confidence::Unknown,
+        "Unknown->Unavailable is NOT §4.2's Available->Unavailable \
+         transition -- must open as Confidence::Unknown, never inherit \
+         Confirmed from the Unavailable destination alone"
+    );
+}
+
+#[test]
+fn transition_confidence_error_to_warning_is_unknown_not_probable() {
+    let base = Instant::now();
+    let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+    let capability_id = CapabilityId::new("org.error-to-warning.svc").unwrap();
+
+    let r1 = engine.admit(&ingress(
+        health_event_with_transition(
+            "evt-error-to-warning-1",
+            "org.error-to-warning.svc",
+            Some(Availability::Available),
+            Availability::Available,
+            Some(Health::Error),
+            Health::Warning,
+            1,
+        ),
+        base,
+        0,
+        0,
+    ));
+    assert!(matches!(r1.outcome, AdmitOutcome::DebouncePending));
+
+    let r2 = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Bad,
+        base + Duration::from_millis(500),
+        1,
+    );
+    assert!(matches!(r2.outcome, AdmitOutcome::IncidentOpened(_)));
+    let id = incident_id_of(&r2.outcome);
+    let incident = engine
+        .open_incidents()
+        .into_iter()
+        .find(|i| i.incident_id == id)
+        .unwrap();
+    assert_eq!(
+        incident.confidence,
+        Confidence::Unknown,
+        "Error->Warning is NOT §4.2's Healthy->Warning transition -- must \
+         open as Confidence::Unknown, never inherit Probable from the \
+         Available+Warning destination alone (the exact defect this \
+         repair fixes)"
+    );
+}
+
+#[test]
+fn transition_confidence_degraded_to_warning_is_unknown_not_probable() {
+    // Defect table's `Degraded -> Warning` row: a capability that was
+    // `Degraded` (availability) with a non-`Healthy` prior `Health`
+    // becomes `Available + Warning`. Pre-fix, this incorrectly inherited
+    // `Probable` from the destination alone; the corrected rule requires
+    // `health_from == Healthy` specifically, which this transition does
+    // not satisfy (`health_from == Error`), so it must open as `Unknown`.
+    let base = Instant::now();
+    let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+    let capability_id = CapabilityId::new("org.degraded-to-warning.svc").unwrap();
+
+    let r1 = engine.admit(&ingress(
+        health_event_with_transition(
+            "evt-degraded-to-warning-1",
+            "org.degraded-to-warning.svc",
+            Some(Availability::Degraded),
+            Availability::Available,
+            Some(Health::Error),
+            Health::Warning,
+            1,
+        ),
+        base,
+        0,
+        0,
+    ));
+    assert!(matches!(r1.outcome, AdmitOutcome::DebouncePending));
+
+    let r2 = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Bad,
+        base + Duration::from_millis(500),
+        1,
+    );
+    assert!(matches!(r2.outcome, AdmitOutcome::IncidentOpened(_)));
+    let id = incident_id_of(&r2.outcome);
+    let incident = engine
+        .open_incidents()
+        .into_iter()
+        .find(|i| i.incident_id == id)
+        .unwrap();
+    assert_eq!(
+        incident.confidence,
+        Confidence::Unknown,
+        "health_from == Error (not Healthy) must not yield Probable -- \
+         must open as Confidence::Unknown, never inherit Probable from \
+         the Available+Warning destination alone"
+    );
+}
+
+#[test]
+fn transition_confidence_missing_from_provenance_unavailable_destination_is_unknown() {
+    let base = Instant::now();
+    let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+    let capability_id = CapabilityId::new("org.missing-from-unavail.svc").unwrap();
+
+    // No availability_from/health_from attributes at all -- exactly what
+    // today's real (pre-Gate-2b-repair) HealthTransitionProducer emits.
+    let r1 = engine.admit(&ingress(
+        health_event(
+            "evt-missing-from-unavail-1",
+            "org.missing-from-unavail.svc",
+            Availability::Unavailable,
+            1,
+        ),
+        base,
+        0,
+        0,
+    ));
+    assert!(matches!(r1.outcome, AdmitOutcome::DebouncePending));
+
+    let r2 = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Bad,
+        base + Duration::from_millis(500),
+        1,
+    );
+    assert!(matches!(r2.outcome, AdmitOutcome::IncidentOpened(_)));
+    let id = incident_id_of(&r2.outcome);
+    let incident = engine
+        .open_incidents()
+        .into_iter()
+        .find(|i| i.incident_id == id)
+        .unwrap();
+    assert_eq!(
+        incident.confidence,
+        Confidence::Unknown,
+        "missing availability_from provenance must never be silently \
+         assumed Available -- Confidence::Unknown, not a fabricated \
+         Confirmed (AGENTS.md: do not convert UNKNOWN into HEALTHY, \
+         applied to provenance completeness)"
+    );
+}
+
+#[test]
+fn transition_confidence_missing_from_provenance_warning_destination_is_unknown() {
+    let base = Instant::now();
+    let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+    let capability_id = CapabilityId::new("org.missing-from-warning.svc").unwrap();
+
+    // No availability_from/health_from attributes at all.
+    let r1 = engine.admit(&ingress(
+        health_event_with_health(
+            "evt-missing-from-warning-1",
+            "org.missing-from-warning.svc",
+            Availability::Available,
+            Health::Warning,
+            1,
+        ),
+        base,
+        0,
+        0,
+    ));
+    assert!(matches!(r1.outcome, AdmitOutcome::DebouncePending));
+
+    let r2 = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Bad,
+        base + Duration::from_millis(500),
+        1,
+    );
+    assert!(matches!(r2.outcome, AdmitOutcome::IncidentOpened(_)));
+    let id = incident_id_of(&r2.outcome);
+    let incident = engine
+        .open_incidents()
+        .into_iter()
+        .find(|i| i.incident_id == id)
+        .unwrap();
+    assert_eq!(
+        incident.confidence,
+        Confidence::Unknown,
+        "missing health_from provenance must never be silently assumed \
+         Healthy -- Confidence::Unknown, not a fabricated Probable"
+    );
+}
+
+#[test]
+fn transition_confidence_degraded_availability_from_healthy_health_from_to_available_warning_is_probable_per_literal_rule()
+ {
+    // Stakeholder-added edge case (beyond the envelope's own minimum
+    // list): availability_from = Degraded, health_from = Healthy,
+    // destination = Available + Warning. The governed §4.2 rule is keyed
+    // purely on the health dimension (`health_from == Healthy &&
+    // health_to == Warning`), NOT on `availability_from` -- so this
+    // legitimately yields Probable even though `availability_from !=
+    // Available`. This asserts that real, literal outcome; it must NOT
+    // be "fixed" by adding an availability_from check that §4.2 never
+    // specifies for the Probable rule.
+    let base = Instant::now();
+    let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+    let capability_id = CapabilityId::new("org.degraded-avail-healthy-health.svc").unwrap();
+
+    let r1 = engine.admit(&ingress(
+        health_event_with_transition(
+            "evt-degraded-avail-healthy-health-1",
+            "org.degraded-avail-healthy-health.svc",
+            Some(Availability::Degraded),
+            Availability::Available,
+            Some(Health::Healthy),
+            Health::Warning,
+            1,
+        ),
+        base,
+        0,
+        0,
+    ));
+    assert!(matches!(r1.outcome, AdmitOutcome::DebouncePending));
+
+    let r2 = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Bad,
+        base + Duration::from_millis(500),
+        1,
+    );
+    assert!(matches!(r2.outcome, AdmitOutcome::IncidentOpened(_)));
+    let id = incident_id_of(&r2.outcome);
+    let incident = engine
+        .open_incidents()
+        .into_iter()
+        .find(|i| i.incident_id == id)
+        .unwrap();
+    assert_eq!(
+        incident.confidence,
+        Confidence::Probable,
+        "health_from == Healthy && health_to == Warning satisfies §4.2's \
+         Probable rule on its own -- availability_from == Degraded does \
+         not block it; no additional availability_from policy is \
+         invented here"
     );
 }
 
@@ -1106,8 +1487,20 @@ fn p2_cor_005_cross_source_correlation_capped_and_worded_correctly() {
     ));
     let psi_id = incident_id_of(&psi_result.outcome);
 
+    // Gate 2a transition-confidence repair: this test's health incident
+    // must genuinely earn Confirmed via real Available->Unavailable
+    // from/to provenance now that confidence is transition-derived, not
+    // inherited from the Unavailable destination alone (R1).
     let r1 = engine.admit(&ingress(
-        health_event("evt-h1", "org.overlap.svc", Availability::Unavailable, 1),
+        health_event_with_transition(
+            "evt-h1",
+            "org.overlap.svc",
+            Some(Availability::Available),
+            Availability::Unavailable,
+            Some(Health::Healthy),
+            Health::Healthy,
+            1,
+        ),
         base,
         10,
         1,

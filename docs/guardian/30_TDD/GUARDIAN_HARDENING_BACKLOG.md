@@ -2,7 +2,7 @@
 title: "Guardian Hardening Backlog"
 kind: "hardening-backlog"
 status: "active"
-last_reviewed: "2026-09-06"
+last_reviewed: "2026-09-07"
 tags:
   - tdd
   - backlog
@@ -126,6 +126,45 @@ open, to establish the mechanism.
   **Revisit trigger/phase**: a future desktop-environment upgrade in the
   VM image, or a client-surface gate that needs a legible glyph
   screenshot for its own evidence.
+  **Status**: open.
+
+### From the Phase 2 Gate 2a/2b health-lifecycle dependency repair (`docs/evidence/p2/GATE2A_TRANSITION_CONFIDENCE_REPAIR_EVIDENCE.md`, `docs/evidence/p2/GATE2B_HEALTH_LIFECYCLE_INTEGRATION_REPAIR_EVIDENCE.md`)
+
+- **Source gate**: Phase 2 Gate 2a transition-confidence repair
+  **Finding**: `classify()` in `crates/guardian-core/src/correlation.rs`
+  still defaults a *missing* (not malformed) `health_to` attribute to
+  `Health::Healthy` for hand-built/malformed `Event`s — a pre-existing
+  backward-compatibility default. Real, repaired producer `Event`s (post
+  Gate 2a transition-confidence repair + Gate 2b health-lifecycle
+  integration repair) always emit `health_to` now, so this is moot for
+  genuine production `Event`s, but the defensive default itself was not
+  hardened and remains a latent risk surface for hand-crafted/malformed
+  external `Event`s.
+  **Why non-blocking**: no real production code path can produce an
+  `Event` missing `health_to` any more; the default only matters for
+  synthetic/malformed input, which is not a path any owned normative ID
+  exercises.
+  **Revisit trigger/phase**: any future gate that accepts externally- or
+  adversarially-constructed `Event`s into the correlation engine, or a
+  dedicated hardening pass over `classify()`'s defaulting behavior.
+  **Status**: open.
+
+- **Source gate**: Phase 2 Gate 2b health-lifecycle integration repair
+  **Finding**: `crates/guardian-daemon/src/dbus_surface.rs`'s
+  `incidents_list_reflects_a_real_incident_the_engine_actually_opened`
+  test genuinely earns its `Confirmed` result from real provenance
+  attributes now (verified causally by independent review, not
+  cosmetic), but it still uses hand-built `Event`s rather than exercising
+  the complete `HealthTransitionProducer`/fresh-observation-advancement
+  path the way `phase2_2b_contract.rs`'s repaired fixtures now do.
+  **Why non-blocking**: the test's assertions are causally earned (real
+  attribute values drive the real `classify()`/`transition_confidence()`
+  path), not a stale fixture papering over a gap; aligning it to the full
+  production path is a consistency improvement, not a correctness fix,
+  and no owned normative ID requires it.
+  **Revisit trigger/phase**: a future pass that consolidates
+  `dbus_surface.rs`'s test fixtures onto the same real-producer/
+  fresh-snapshot pattern `phase2_2b_contract.rs` now uses.
   **Status**: open.
 
 ## Rule
