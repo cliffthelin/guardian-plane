@@ -75,7 +75,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use guardian_provider_api::{Availability, CapabilityId, IncidentId, ProviderId};
+use guardian_provider_api::{Availability, CapabilityId, EventId, Health, IncidentId, ProviderId};
 
 use crate::event::Event;
 use crate::incident::{Confidence, Incident, IncidentStatus};
@@ -101,6 +101,18 @@ pub const HEALTH_CAPABILITY_ID_ATTR: &str = "capability_id";
 /// The attribute key a provider-health transition event carries the
 /// target [`Availability`] wire token under.
 pub const HEALTH_AVAILABILITY_TO_ATTR: &str = "availability_to";
+
+/// The attribute key a provider-health transition event carries the
+/// target [`Health`] wire token under. Optional on the wire today: the
+/// real production producer (`HealthTransitionProducer`, Gate 2b) does
+/// not yet emit this attribute (see the Gate 2a health-lifecycle repair
+/// TDD's "Downstream Gate 2b repair" section) -- an event missing this
+/// attribute is treated as [`Health::Healthy`] (see [`classify`]),
+/// preserving today's real-production behavior for every event Gate 2b
+/// actually emits. A test may set this attribute explicitly to exercise
+/// [`health_direction`]'s other rows before Gate 2b's own producer
+/// repair lands.
+pub const HEALTH_HEALTH_TO_ATTR: &str = "health_to";
 
 /// The correlation-ingress envelope (§6). Exact naming per the
 /// implementation handoff; semantics are binding. `ingress_clock`/
@@ -294,22 +306,65 @@ struct OpenIncidentState {
     last_critical_order: Option<IngressOrder>,
 }
 
+/// `Bad` carries the [`Confidence`] tier governed for the specific
+/// transition/state that produced it (Gate 2a health-lifecycle repair,
+/// audit-driven confidence-classification correction). This is the
+/// classification result's own typed boundary for confidence: the
+/// information is captured once, here, at classification time, and
+/// carried forward (via [`DebounceCandidate::target`]) to whichever call
+/// site later opens the incident -- never hardcoded or reconstructed
+/// downstream from a bare `Bad` with no further detail. See
+/// [`health_direction`]'s table for which tier each transition carries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HealthDirection {
     Good,
-    Bad,
+    Bad(Confidence),
 }
 
-fn health_direction(availability: Availability) -> Option<HealthDirection> {
+/// Classifies a target `(Availability, Health)` pair into a
+/// [`HealthDirection`], or `None` when the pair is unresolved/
+/// non-promoting (Gate 2a health-lifecycle repair R3/R4). Grounded
+/// exactly in the repair TDD's "Target-state classification vs. incident
+/// confidence" section (§4.2's incident creation rule and confidence
+/// rule, both quoted there) -- classification and confidence are kept as
+/// the two separate concepts that section requires, but confidence is
+/// still decided *here*, at classification time, not reconstructed later
+/// from a direction-only `Bad`:
+///
+/// | `Availability` | `Health` | Classification | Confidence |
+/// |---|---|---|---|
+/// | `Available` | `Healthy` | `Good` | -- |
+/// | `Available` | `Warning` | `Bad` -- `Healthy->Warning` is a named, governed transition | `Probable` -- §4.2's named tier for this transition |
+/// | `Available` | `Error`/`Stale`/`Unknown` | unresolved -- never `Good` (the regression the prior repair pass closed), never assumed `Bad` either | -- |
+/// | `Degraded` | any | `Bad` -- §4.2 names "sustained `Degraded`" directly as incident-worthy | `Unknown` -- §4.2's creation rule covers `Degraded`, but its confidence rule assigns no tier; `Confidence::Unknown` represents that honestly rather than inventing one |
+/// | `Unavailable` | any | `Bad` -- §4.2: "a debounced transition into `Unavailable`..." (already-true prior behavior) | `Confirmed` -- §4.2's named tier for `Available->Unavailable` |
+/// | `Unknown`/`Unsupported` (availability) | -- | unresolved -- AGENTS.md: "Do not convert UNKNOWN into HEALTHY," and the same discipline covers `Bad` | -- |
+fn health_direction(availability: Availability, health: Health) -> Option<HealthDirection> {
     match availability {
-        Availability::Available => Some(HealthDirection::Good),
-        Availability::Unavailable => Some(HealthDirection::Bad),
-        // Degraded/Unsupported/Unknown: not actionable in this gate's
-        // narrowed synthetic rule (documented scoping decision -- richer
-        // per-state handling is OPTIONAL FUTURE ENRICHMENT, implementation
-        // handoff §13). `Unknown` in particular must never be promoted to
-        // a confident state (AGENTS.md).
-        Availability::Degraded | Availability::Unsupported | Availability::Unknown => None,
+        Availability::Unavailable => Some(HealthDirection::Bad(Confidence::Confirmed)),
+        // §4.2 names "sustained Degraded" as incident-worthy but assigns
+        // it no confidence tier of its own -- `Confidence::Unknown` is
+        // the honest representation (see the repair TDD's confidence
+        // table), never inherited from `Unavailable`'s `Confirmed`.
+        Availability::Degraded => Some(HealthDirection::Bad(Confidence::Unknown)),
+        // `Unknown`/`Unsupported` availability is unresolved regardless of
+        // `Health` -- never promoted to either `Good` or `Bad` by
+        // assumption (AGENTS.md: "Do not convert UNKNOWN into HEALTHY").
+        Availability::Unknown | Availability::Unsupported => None,
+        Availability::Available => match health {
+            Health::Healthy => Some(HealthDirection::Good),
+            // `Healthy->Warning` is §4.2's other named transition,
+            // confidence `Probable` -- previously collapsed into the same
+            // `Bad` variant as `Unavailable` and so incorrectly inherited
+            // `Confirmed` at incident-open time.
+            Health::Warning => Some(HealthDirection::Bad(Confidence::Probable)),
+            // `Available + Error`: the exact regression the prior repair
+            // pass closed -- pre-repair code returned `Good` here
+            // unconditionally. Neither `Good` nor `Bad` is authorized by
+            // §4.2 for this combination; `Stale`/`Unknown` are likewise
+            // left unresolved (R3).
+            Health::Error | Health::Stale | Health::Unknown => None,
+        },
     }
 }
 
@@ -317,6 +372,43 @@ fn health_direction(availability: Availability) -> Option<HealthDirection> {
 struct DebounceCandidate {
     target: HealthDirection,
     first_seen: IngressOrder,
+}
+
+/// A fresh, real-shaped re-observation of one capability's current state
+/// (Gate 2a health-lifecycle repair R1/R2/R3/R5) -- distinct from a
+/// second [`Event`]. This is how the engine's caller (in production,
+/// Gate 2b's downstream daemon repair; in tests, a direct call) supplies
+/// "the capability is still/again in this state" independent of whether
+/// the edge-triggered producer emitted a new `Event` for it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FreshHealthObservation {
+    /// Cleanly re-observed as `Available` + `Healthy`.
+    Good,
+    /// Cleanly re-observed as `Unavailable`, `Degraded`, or
+    /// `Available` + `Warning` (see [`health_direction`]).
+    Bad,
+    /// Not cleanly re-observed as either fully `Good` or fully `Bad`:
+    /// absent from the snapshot entirely, `Unknown`/`Unsupported`
+    /// `Availability`, or `Available` + `Error`/`Stale`/`Unknown`
+    /// `Health` (R3). Never promotes a pending candidate in either
+    /// direction, and never discards/corrupts it -- the candidate remains
+    /// pending, exactly as before the observation.
+    Unresolved,
+}
+
+impl FreshHealthObservation {
+    /// Classifies a fresh `(Availability, Health)` re-observation using
+    /// the same table [`health_direction`] uses for `Event`-driven
+    /// classification (R4) -- the two paths agree on what counts as
+    /// `Good`/`Bad`/unresolved.
+    #[must_use]
+    pub fn classify(availability: Availability, health: Health) -> Self {
+        match health_direction(availability, health) {
+            Some(HealthDirection::Good) => Self::Good,
+            Some(HealthDirection::Bad(_)) => Self::Bad,
+            None => Self::Unresolved,
+        }
+    }
 }
 
 /// Classification of one admitted [`Event`] into the rule this module
@@ -356,7 +448,19 @@ fn classify(event: &Event) -> Option<Classification> {
         let capability_id = CapabilityId::new(capability_id.clone()).ok()?;
         let availability_to = event.attributes.get(HEALTH_AVAILABILITY_TO_ATTR)?;
         let availability: Availability = availability_to.parse().unwrap_or(Availability::Unknown);
-        let direction = health_direction(availability)?;
+        // `Health` is optional on the wire today (see
+        // `HEALTH_HEALTH_TO_ATTR`'s doc comment) -- absent or
+        // unparseable defaults to `Healthy`, preserving real production
+        // behavior for every event the current (pre-Gate-2b-repair)
+        // producer actually emits, while a test may set this attribute
+        // explicitly to exercise the other rows of `health_direction`'s
+        // table.
+        let health: Health = event
+            .attributes
+            .get(HEALTH_HEALTH_TO_ATTR)
+            .and_then(|token| token.parse().ok())
+            .unwrap_or(Health::Healthy);
+        let direction = health_direction(availability, health)?;
         return Some(Classification::Health {
             capability_id,
             direction,
@@ -512,6 +616,12 @@ impl CorrelationEngine {
         }
     }
 
+    /// Opens a new incident for `key`, driven by a real [`CorrelationIngress`]
+    /// (an admitted [`Event`]). Delegates to [`Self::open_new_incident_at`]
+    /// -- the fresh-observation-driven promotion path
+    /// ([`Self::advance_health_dwell`]) uses that shared core directly,
+    /// since it has no [`Event`]/[`CorrelationIngress`] of its own to
+    /// supply evidence/linkage from (Gate 2a health-lifecycle repair R1).
     fn open_new_incident(
         &mut self,
         key: CorrelationKey,
@@ -520,17 +630,48 @@ impl CorrelationEngine {
         summary: String,
         forced: &mut Vec<IncidentId>,
     ) -> IncidentId {
+        self.open_new_incident_at(
+            key,
+            ingress_order(ingress),
+            ingress.ingress_sequence,
+            ingress.event.raw_reference.clone(),
+            Some(ingress.event.event_id.clone()),
+            confidence,
+            summary,
+            forced,
+        )
+    }
+
+    /// The shared core of incident opening, generic over provenance: a
+    /// real [`Event`]-backed admission supplies `evidence_line`/`event_id`
+    /// from the [`Event`] itself ([`Self::open_new_incident`]); a
+    /// fresh-observation-driven promotion
+    /// ([`Self::advance_health_dwell`]) supplies a textual evidence line
+    /// describing the re-observation and no `event_id` (there is no
+    /// [`Event`] to link -- linking a fabricated one would itself be the
+    /// defect this repair closes).
+    #[allow(clippy::too_many_arguments)] // generic provenance core shared by Event-driven and fresh-observation-driven opening (Gate 2a health-lifecycle repair R1)
+    fn open_new_incident_at(
+        &mut self,
+        key: CorrelationKey,
+        order: IngressOrder,
+        ingress_sequence: u64,
+        evidence_line: String,
+        event_id: Option<EventId>,
+        confidence: Confidence,
+        summary: String,
+        forced: &mut Vec<IncidentId>,
+    ) -> IncidentId {
         self.ensure_open_capacity(forced);
         let backreference = self.backreference_text(&key);
         let id = self.next_incident_id();
-        let order = ingress_order(ingress);
-        let mut evidence = vec![ingress.event.raw_reference.clone()];
+        let mut evidence = vec![evidence_line];
         if let Some(text) = backreference {
             evidence.push(text);
         }
         let mut incident = Incident {
             incident_id: id.clone(),
-            opened_at: format!("ingress-{}", ingress.ingress_sequence),
+            opened_at: format!("ingress-{ingress_sequence}"),
             closed_at: None,
             status: IncidentStatus::Open,
             summary,
@@ -544,7 +685,9 @@ impl CorrelationEngine {
             transaction_ids: Vec::new(),
             outcome: None,
         };
-        incident.link_event(ingress.event.event_id.clone());
+        if let Some(event_id) = event_id {
+            incident.link_event(event_id);
+        }
         self.open.insert(
             key.clone(),
             OpenIncidentState {
@@ -699,7 +842,7 @@ impl CorrelationEngine {
         capability_id: CapabilityId,
         direction: HealthDirection,
     ) -> AdmitResult {
-        if direction == HealthDirection::Bad {
+        if matches!(direction, HealthDirection::Bad(_)) {
             let id = self.open.get(key).unwrap().incident.incident_id.clone();
             if let Some(state) = self.open.get_mut(key) {
                 state.incident.link_event(ingress.event.event_id.clone());
@@ -758,7 +901,7 @@ impl CorrelationEngine {
             // candidate is a no-op -- clear any lingering Bad candidate
             // that flapped back to baseline before it could promote.
             if let Some(candidate) = self.debounce.get(&capability_id) {
-                if candidate.target == HealthDirection::Bad {
+                if matches!(candidate.target, HealthDirection::Bad(_)) {
                     self.debounce.remove(&capability_id);
                 }
             }
@@ -771,7 +914,7 @@ impl CorrelationEngine {
             .get(&capability_id)
             .map(|candidate| (candidate.target, candidate.first_seen));
 
-        if let Some((HealthDirection::Bad, first_seen)) = existing {
+        if let Some((HealthDirection::Bad(confidence), first_seen)) = existing {
             let elapsed = order.0.saturating_duration_since(first_seen.0);
             if elapsed < self.policy.health_min_dwell {
                 return AdmitResult::simple(AdmitOutcome::DebouncePending);
@@ -781,7 +924,7 @@ impl CorrelationEngine {
             let id = self.open_new_incident(
                 key.clone(),
                 ingress,
-                Confidence::Confirmed,
+                confidence,
                 format!(
                     "capability {} debounced transition to Unavailable (direct provider report)",
                     capability_id.as_str()
@@ -798,7 +941,11 @@ impl CorrelationEngine {
         // Either flapping back to `Bad` after drifting toward `Good`
         // (reset the existing tracked candidate in-place -- same key, not
         // a new one, never rejected), or a genuinely new key (subject to
-        // the reject-not-evict capacity rule).
+        // the reject-not-evict capacity rule). `direction` is guaranteed
+        // `Bad(_)` here (the `Good` case returned above) and carries this
+        // specific event's own governed confidence tier -- stored as the
+        // candidate's `target` so it survives to whichever call site later
+        // promotes it, rather than being hardcoded/reconstructed there.
         if existing.is_none()
             && self.debounce.len() >= self.policy.debounce_capacity
             && !self.debounce.contains_key(&capability_id)
@@ -808,11 +955,127 @@ impl CorrelationEngine {
         self.debounce.insert(
             capability_id,
             DebounceCandidate {
-                target: HealthDirection::Bad,
+                target: direction,
                 first_seen: order,
             },
         );
         AdmitResult::simple(AdmitOutcome::DebouncePending)
+    }
+
+    /// Gate 2a health-lifecycle repair R1/R2/R3/R5: advances a pending
+    /// debounce candidate for `capability_id` past `health_min_dwell` on a
+    /// fresh re-observation of that specific capability's current state --
+    /// never on the passage of time alone (R2: nothing else in this
+    /// module reads/mutates the debounce ring's dwell clock, so a
+    /// candidate with no fresh re-observation call for it is structurally
+    /// incapable of promoting no matter how much `Instant` time passes).
+    ///
+    /// This path is additive alongside the existing `Event`-driven
+    /// promotion in [`Self::admit_health_candidate`]/
+    /// [`Self::admit_health_with_open_incident`] (R7) -- it consults and
+    /// updates only [`Self::debounce`]/[`Self::open`], the same state
+    /// those paths already own, and never bypasses the same
+    /// `health_min_dwell` check.
+    ///
+    /// - No pending candidate for `capability_id`: no-op
+    ///   ([`AdmitOutcome::Ignored`]) -- there is nothing to advance.
+    /// - `observation` matches the candidate's own pending direction
+    ///   (`Bad` candidate + [`FreshHealthObservation::Bad`], or `Good`
+    ///   candidate + [`FreshHealthObservation::Good`]) and dwell has
+    ///   elapsed: promotes -- opens exactly one incident (`Bad`) or
+    ///   closes exactly one incident (`Good`), exactly as the `Event`-
+    ///   driven path does, but consuming no second [`Event`].
+    /// - `observation` matches but dwell has not yet elapsed: remains
+    ///   [`AdmitOutcome::DebouncePending`], candidate untouched.
+    /// - `observation` is [`FreshHealthObservation::Unresolved`], or
+    ///   contradicts the candidate's pending direction: R3 -- the
+    ///   candidate is left exactly as it was (still pending, `first_seen`
+    ///   untouched), never silently promoted, never discarded/corrupted.
+    ///   (A *contradicting* observation intentionally does not reset/clear
+    ///   the candidate here -- that Event-driven "flap back to baseline
+    ///   clears the candidate" behavior belongs to
+    ///   [`Self::admit_health_candidate`]'s own `Good`-direction branch,
+    ///   which continues to own it (R7); this method's only job is
+    ///   advancing a *matching* re-observation past dwell.)
+    pub fn advance_health_dwell(
+        &mut self,
+        capability_id: &CapabilityId,
+        observation: FreshHealthObservation,
+        ingress_clock: Instant,
+        ingress_sequence: u64,
+    ) -> AdmitResult {
+        let order: IngressOrder = (ingress_clock, ingress_sequence);
+        let Some(candidate) = self.debounce.get(capability_id) else {
+            return AdmitResult::simple(AdmitOutcome::Ignored);
+        };
+        let target = candidate.target;
+        let first_seen = candidate.first_seen;
+
+        let matches_target = matches!(
+            (target, observation),
+            (HealthDirection::Bad(_), FreshHealthObservation::Bad)
+                | (HealthDirection::Good, FreshHealthObservation::Good)
+        );
+        if !matches_target {
+            // Unresolved, or contradicts the pending direction: R3 --
+            // leave the candidate exactly as it was.
+            return AdmitResult::simple(AdmitOutcome::DebouncePending);
+        }
+
+        let elapsed = order.0.saturating_duration_since(first_seen.0);
+        if elapsed < self.policy.health_min_dwell {
+            return AdmitResult::simple(AdmitOutcome::DebouncePending);
+        }
+
+        let key = CorrelationKey::Health {
+            capability_id: capability_id.clone(),
+        };
+        self.debounce.remove(capability_id);
+
+        match target {
+            HealthDirection::Bad(confidence) => {
+                let mut forced = Vec::new();
+                let evidence_line = format!(
+                    "capability {} debounced transition to Unavailable (fresh re-observation, no second Event manufactured)",
+                    capability_id.as_str()
+                );
+                let id = self.open_new_incident_at(
+                    key.clone(),
+                    order,
+                    ingress_sequence,
+                    evidence_line,
+                    None,
+                    confidence,
+                    format!(
+                        "capability {} debounced transition to Unavailable (direct provider report)",
+                        capability_id.as_str()
+                    ),
+                    &mut forced,
+                );
+                self.cross_reference(&key);
+                AdmitResult {
+                    outcome: AdmitOutcome::IncidentOpened(id),
+                    forced_closures: forced,
+                }
+            }
+            HealthDirection::Good => {
+                match self.close_key(
+                    &key,
+                    "debounced recovery to Available (fresh re-observation, no second Event manufactured)",
+                ) {
+                    Some(id) => AdmitResult::simple(AdmitOutcome::IncidentClosed(id)),
+                    // Defensive, not expected in practice: a Good-direction
+                    // candidate is only ever created by
+                    // `admit_health_with_open_incident` while `key` is
+                    // already open, so `close_key` finding no such key
+                    // here would mean that invariant was already broken
+                    // elsewhere. Reporting a safe `Ignored` rather than
+                    // panicking costs nothing and keeps this a typed,
+                    // non-crashing outcome either way.
+                    None => AdmitResult::simple(AdmitOutcome::Ignored),
+                }
+            }
+        }
     }
 
     /// `P2-REC-001`/`P2-REC-003`/`P2-REC-005`: records a rejection --

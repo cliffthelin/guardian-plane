@@ -16,13 +16,13 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use guardian_core::correlation::{
-    AdmitOutcome, CorrelationEngine, CorrelationIngress, CorrelationPolicy,
-    HEALTH_TRANSITION_EVENT_TYPE, IngressClock,
+    AdmitOutcome, CorrelationEngine, CorrelationIngress, CorrelationPolicy, FreshHealthObservation,
+    HEALTH_HEALTH_TO_ATTR, HEALTH_TRANSITION_EVENT_TYPE, IngressClock,
 };
 use guardian_core::event::{Event, normalize_key};
 use guardian_core::incident::{Confidence, IncidentStatus};
 use guardian_core::risk::Risk;
-use guardian_provider_api::{Availability, EventId, ProviderId};
+use guardian_provider_api::{Availability, CapabilityId, EventId, Health, ProviderId};
 
 // ---------------------------------------------------------------------
 // Synthetic producers -- test-local only, shaped like the real G8 PSI
@@ -75,6 +75,28 @@ fn health_event(id: &str, capability_id: &str, to: Availability, raw_seq: u64) -
         raw_reference: format!("capability health transition {raw_seq}"),
         attributes,
     }
+}
+
+/// Gate 2a health-lifecycle repair (R4): like [`health_event`], but also
+/// carries an explicit `health_to` attribute -- the real production
+/// producer does not emit this yet (Gate 2b's own downstream repair), but
+/// this gate's own tests may carry it early to exercise
+/// `health_direction`'s full `(Availability, Health)` table, exactly as
+/// this file's `health_event` already synthesizes a shape no real
+/// producer emits verbatim.
+fn health_event_with_health(
+    id: &str,
+    capability_id: &str,
+    to: Availability,
+    health: Health,
+    raw_seq: u64,
+) -> Event {
+    let mut event = health_event(id, capability_id, to, raw_seq);
+    event.attributes.insert(
+        HEALTH_HEALTH_TO_ATTR.to_owned(),
+        health.wire_token().to_owned(),
+    );
+    event
 }
 
 fn ingress(event: Event, base: Instant, offset_ms: u64, sequence: u64) -> CorrelationIngress {
@@ -374,13 +396,31 @@ fn window_boundary_just_outside_opens_new_incident_with_backreference() {
 }
 
 // ---------------------------------------------------------------------
-// P2-COR-003/004 -- provider-health debounce/dwell.
+// P2-COR-003/004 -- provider-health debounce/dwell. REPAIRED (Gate 2a
+// health-lifecycle repair, reopened normative IDs -- see
+// docs/guardian/30_TDD/gates/phase2-2a-health-lifecycle-repair-tdd.md).
+//
+// The defect: the real production event source
+// (`HealthTransitionProducer`, Gate 2b) is edge-triggered -- one Event
+// per real state change, nothing on an unchanged pair -- so it can never
+// supply the "second Event" the OLD version of this test constructed by
+// hand to prove promotion. `p2_cor_003` below is re-expressed (R1) to
+// drive the real production shape: one real Event, then a later FRESH
+// RE-OBSERVATION (`CorrelationEngine::advance_health_dwell`), never a
+// second synthetic/cloned Event. The old Event-driven two-Event
+// promotion path is NOT removed (R7) -- it is proven separately by
+// `regression_second_real_bad_event_still_promotes_pending_candidate`.
 // ---------------------------------------------------------------------
 
 #[test]
 fn p2_cor_003_debounced_available_to_unavailable_opens_exactly_one_incident() {
     let base = Instant::now();
     let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+    let capability_id = CapabilityId::new("org.example.svc").unwrap();
+
+    // One real transition Event -- exactly what the edge-triggered
+    // HealthTransitionProducer emits for a single real state change.
+    // Opens no incident yet.
     let r1 = engine.admit(&ingress(
         health_event("evt-h1", "org.example.svc", Availability::Unavailable, 1),
         base,
@@ -389,17 +429,25 @@ fn p2_cor_003_debounced_available_to_unavailable_opens_exactly_one_incident() {
     ));
     assert!(matches!(r1.outcome, AdmitOutcome::DebouncePending));
 
-    let r2 = engine.admit(&ingress(
-        health_event("evt-h2", "org.example.svc", Availability::Unavailable, 2),
-        base,
-        500,
+    // A LATER FRESH RE-OBSERVATION -- not a second Event, not a
+    // clone-and-mutate of evt-h1 -- showing the capability is still
+    // Unavailable. Real production never emits a second Event for an
+    // unchanged capability; this is the engine consulting a fresh
+    // snapshot directly (R1). Advances the candidate past dwell and
+    // opens exactly one Incident.
+    let r2 = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Bad,
+        base + Duration::from_millis(500),
         1,
-    ));
+    );
     assert!(matches!(r2.outcome, AdmitOutcome::IncidentOpened(_)));
     let id = incident_id_of(&r2.outcome);
 
-    // A further Unavailable reading links to the SAME incident, never a
-    // second one.
+    // A further Unavailable Event links to the SAME incident, never a
+    // second one -- the pre-existing Event-driven "further Bad reading
+    // just links" behavior (`admit_health_with_open_incident`) is
+    // untouched by this repair.
     let r3 = engine.admit(&ingress(
         health_event("evt-h3", "org.example.svc", Availability::Unavailable, 3),
         base,
@@ -409,6 +457,17 @@ fn p2_cor_003_debounced_available_to_unavailable_opens_exactly_one_incident() {
     assert!(matches!(r3.outcome, AdmitOutcome::IncidentUpdated(_)));
     assert_eq!(incident_id_of(&r3.outcome), id);
 
+    // A further fresh Bad re-observation, now that the incident is
+    // already open (no candidate left pending to advance), is a safe
+    // no-op -- it must never open a second incident.
+    let r4 = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Bad,
+        base + Duration::from_millis(900),
+        3,
+    );
+    assert!(!matches!(r4.outcome, AdmitOutcome::IncidentOpened(_)));
+
     assert_eq!(engine.open_incidents().len(), 1);
 }
 
@@ -417,6 +476,9 @@ fn p2_cor_004_flapping_faster_than_dwell_produces_no_thrashing() {
     let base = Instant::now();
     let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
     // Flap every 100ms, well under the 500ms dwell -- must never promote.
+    // Event-driven: this exercises the pre-existing "Good clears a
+    // pending Bad candidate" reset behavior (`admit_health_candidate`),
+    // untouched by this repair (R7).
     for (index, offset) in [0u64, 100, 200, 300, 400].into_iter().enumerate() {
         let to = if index % 2 == 0 {
             Availability::Unavailable
@@ -440,6 +502,591 @@ fn p2_cor_004_flapping_faster_than_dwell_produces_no_thrashing() {
         );
     }
     assert_eq!(engine.open_incidents().len(), 0);
+}
+
+#[test]
+fn p2_cor_004_flapping_faster_than_dwell_via_fresh_observations_produces_no_thrashing() {
+    // R6: the same flapping-never-promotes guarantee, re-expressed to
+    // drive dwell-advance via fresh re-observations rather than solely
+    // via distinct Events -- the real-shaped path this repair adds.
+    let base = Instant::now();
+    let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+    let capability_id = CapabilityId::new("org.flap2.svc").unwrap();
+
+    // One real Event creates the pending Bad candidate.
+    let r1 = engine.admit(&ingress(
+        health_event(
+            "evt-flap2-seed",
+            "org.flap2.svc",
+            Availability::Unavailable,
+            1,
+        ),
+        base,
+        0,
+        0,
+    ));
+    assert!(matches!(r1.outcome, AdmitOutcome::DebouncePending));
+
+    // Flap fresh re-observations every 100ms, well under the 500ms
+    // dwell -- alternating Good/Bad must never promote. A non-matching
+    // (Good) observation against a pending Bad candidate is left exactly
+    // as-is (R3) rather than resetting it, so this also proves that even
+    // without a reset, staying under dwell from the ORIGINAL first_seen
+    // is what keeps this safe.
+    for (index, offset) in [100u64, 200, 300, 400].into_iter().enumerate() {
+        let observation = if index % 2 == 0 {
+            FreshHealthObservation::Good
+        } else {
+            FreshHealthObservation::Bad
+        };
+        let result = engine.advance_health_dwell(
+            &capability_id,
+            observation,
+            base + Duration::from_millis(offset),
+            (index + 1) as u64,
+        );
+        assert!(
+            !matches!(result.outcome, AdmitOutcome::IncidentOpened(_)),
+            "flapping faster than dwell must never open an incident via fresh re-observations (offset {offset})"
+        );
+    }
+    assert_eq!(engine.open_incidents().len(), 0);
+}
+
+// ---------------------------------------------------------------------
+// R2 -- no fresh observation means no promotion from wall time alone.
+// ---------------------------------------------------------------------
+
+#[test]
+fn r2_no_fresh_observation_means_no_promotion_from_wall_time_alone() {
+    let base = Instant::now();
+    let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+    let r1 = engine.admit(&ingress(
+        health_event("evt-h1", "org.walltime.svc", Availability::Unavailable, 1),
+        base,
+        0,
+        0,
+    ));
+    assert!(matches!(r1.outcome, AdmitOutcome::DebouncePending));
+
+    // No fresh re-observation call for org.walltime.svc at all -- only
+    // ingress-clock time advancing (via an unrelated capability's real
+    // Event, admitted well past health_min_dwell). The pending candidate
+    // must not promote merely because time elapsed.
+    let r_other = engine.admit(&ingress(
+        health_event(
+            "evt-other",
+            "org.unrelated.svc",
+            Availability::Unavailable,
+            2,
+        ),
+        base,
+        10_000,
+        1,
+    ));
+    assert!(matches!(r_other.outcome, AdmitOutcome::DebouncePending));
+
+    assert_eq!(
+        engine.open_incidents().len(),
+        0,
+        "no incident opened from wall time alone, with no fresh re-observation"
+    );
+    assert_eq!(engine.debounce_candidate_count(), 2);
+}
+
+// ---------------------------------------------------------------------
+// R3 -- unknown/absent/unclassifiable fresh observation never falsely
+// advances Good or Bad, and never corrupts the pending candidate.
+// ---------------------------------------------------------------------
+
+#[test]
+fn r3_fresh_observation_unresolved_never_falsely_advances_or_corrupts() {
+    let base = Instant::now();
+    let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+    let capability_id = CapabilityId::new("org.r3.svc").unwrap();
+
+    let r1 = engine.admit(&ingress(
+        health_event("evt-h1", "org.r3.svc", Availability::Unavailable, 1),
+        base,
+        0,
+        0,
+    ));
+    assert!(matches!(r1.outcome, AdmitOutcome::DebouncePending));
+
+    // (a) absent from the snapshot entirely.
+    let r_absent = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Unresolved,
+        base + Duration::from_millis(600),
+        1,
+    );
+    assert!(matches!(r_absent.outcome, AdmitOutcome::DebouncePending));
+
+    // (b) Availability::Unknown.
+    let r_unknown_availability = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::classify(Availability::Unknown, Health::Healthy),
+        base + Duration::from_millis(700),
+        2,
+    );
+    assert!(matches!(
+        r_unknown_availability.outcome,
+        AdmitOutcome::DebouncePending
+    ));
+
+    // (c) Health::Unknown (with Availability::Available, which alone is
+    // not decisive for classification -- see health_direction's table).
+    let r_unknown_health = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::classify(Availability::Available, Health::Unknown),
+        base + Duration::from_millis(800),
+        3,
+    );
+    assert!(matches!(
+        r_unknown_health.outcome,
+        AdmitOutcome::DebouncePending
+    ));
+
+    // Throughout (a)-(c) the candidate was never promoted, never
+    // discarded/corrupted -- it remains pending, exactly as before, and
+    // its ORIGINAL first_seen (from evt-h1 at offset 0) is untouched: a
+    // genuine fresh Bad re-observation at offset 900 (900ms elapsed,
+    // past the 500ms dwell) still promotes normally.
+    assert_eq!(engine.debounce_candidate_count(), 1);
+    assert_eq!(engine.open_incidents().len(), 0);
+    let r_final = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Bad,
+        base + Duration::from_millis(900),
+        4,
+    );
+    assert!(matches!(r_final.outcome, AdmitOutcome::IncidentOpened(_)));
+}
+
+// ---------------------------------------------------------------------
+// R4 -- health_direction()/FreshHealthObservation::classify() use both
+// Availability and Health; Available+Error no longer misclassifies as
+// Good, and is not assumed Bad either.
+// ---------------------------------------------------------------------
+
+#[test]
+fn r4_fresh_health_observation_classify_matches_state_table() {
+    assert_eq!(
+        FreshHealthObservation::classify(Availability::Available, Health::Healthy),
+        FreshHealthObservation::Good
+    );
+    assert_eq!(
+        FreshHealthObservation::classify(Availability::Available, Health::Warning),
+        FreshHealthObservation::Bad,
+        "Healthy->Warning is a named, governed transition"
+    );
+    assert_eq!(
+        FreshHealthObservation::classify(Availability::Available, Health::Error),
+        FreshHealthObservation::Unresolved,
+        "the exact regression this repair closes: Available+Error must never silently classify as Good, and is not assumed Bad either"
+    );
+    assert_eq!(
+        FreshHealthObservation::classify(Availability::Available, Health::Stale),
+        FreshHealthObservation::Unresolved
+    );
+    assert_eq!(
+        FreshHealthObservation::classify(Availability::Available, Health::Unknown),
+        FreshHealthObservation::Unresolved
+    );
+    assert_eq!(
+        FreshHealthObservation::classify(Availability::Degraded, Health::Error),
+        FreshHealthObservation::Bad,
+        "sustained Degraded is incident-worthy regardless of Health"
+    );
+    assert_eq!(
+        FreshHealthObservation::classify(Availability::Unavailable, Health::Healthy),
+        FreshHealthObservation::Bad,
+        "already-true prior behavior, confirmed unchanged"
+    );
+    assert_eq!(
+        FreshHealthObservation::classify(Availability::Unknown, Health::Healthy),
+        FreshHealthObservation::Unresolved,
+        "AGENTS.md: do not convert UNKNOWN into HEALTHY -- nor into a confident Bad"
+    );
+    assert_eq!(
+        FreshHealthObservation::classify(Availability::Unsupported, Health::Healthy),
+        FreshHealthObservation::Unresolved
+    );
+}
+
+#[test]
+fn r4_event_driven_available_error_never_misclassified_as_good() {
+    let base = Instant::now();
+    let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+
+    // Establish a real open incident (Unavailable, real production
+    // shape: one Event, then a fresh Bad re-observation past dwell).
+    let capability_id = CapabilityId::new("org.r4.svc").unwrap();
+    let r1 = engine.admit(&ingress(
+        health_event("evt-h1", "org.r4.svc", Availability::Unavailable, 1),
+        base,
+        0,
+        0,
+    ));
+    assert!(matches!(r1.outcome, AdmitOutcome::DebouncePending));
+    let r2 = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Bad,
+        base + Duration::from_millis(500),
+        1,
+    );
+    let id = incident_id_of(&r2.outcome);
+
+    // Available + Error must NOT be treated as a recovery (Good) --
+    // before this repair, health_direction() mapped Available
+    // unconditionally to Good regardless of Health, which would have
+    // started (or advanced) a debounced-recovery candidate here. It must
+    // also not be treated as a further Bad reading -- no existing §4.2
+    // rule authorizes that either.
+    let r3 = engine.admit(&ingress(
+        health_event_with_health(
+            "evt-h3",
+            "org.r4.svc",
+            Availability::Available,
+            Health::Error,
+            2,
+        ),
+        base,
+        600,
+        2,
+    ));
+    assert!(
+        matches!(r3.outcome, AdmitOutcome::Ignored),
+        "Available+Error must be unresolved -- neither a false recovery nor a false further-Bad linkage, got {:?}",
+        r3.outcome
+    );
+
+    // The incident remains open, untouched, still exactly one.
+    assert_eq!(engine.open_incidents().len(), 1);
+    let incident = engine
+        .open_incidents()
+        .into_iter()
+        .find(|i| i.incident_id == id)
+        .unwrap();
+    assert_eq!(
+        incident.event_ids.len(),
+        0,
+        "this incident was opened via a fresh re-observation (no Event to \
+         link), and the unresolved Available+Error event must not have \
+         linked either"
+    );
+}
+
+// ---------------------------------------------------------------------
+// R5 -- symmetric recovery/closure: a fresh re-observation advances a
+// pending Good candidate past dwell and closes exactly one Incident,
+// with no second Event manufactured.
+// ---------------------------------------------------------------------
+
+#[test]
+fn r5_symmetric_recovery_fresh_observation_closes_incident() {
+    let base = Instant::now();
+    let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+    let capability_id = CapabilityId::new("org.r5.svc").unwrap();
+
+    // Open an incident via the real production shape (R1): one real
+    // Event, then a fresh Bad re-observation past dwell.
+    let r1 = engine.admit(&ingress(
+        health_event("evt-h1", "org.r5.svc", Availability::Unavailable, 1),
+        base,
+        0,
+        0,
+    ));
+    assert!(matches!(r1.outcome, AdmitOutcome::DebouncePending));
+    let r2 = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Bad,
+        base + Duration::from_millis(500),
+        1,
+    );
+    let incident_id = incident_id_of(&r2.outcome);
+    assert_eq!(engine.open_incidents().len(), 1);
+
+    // One real recovery Event -- starts a Good-direction debounce
+    // candidate via the existing, untouched
+    // `admit_health_with_open_incident` logic.
+    let r3 = engine.admit(&ingress(
+        health_event("evt-recover", "org.r5.svc", Availability::Available, 2),
+        base,
+        600,
+        2,
+    ));
+    assert!(matches!(r3.outcome, AdmitOutcome::DebouncePending));
+
+    // A LATER FRESH RE-OBSERVATION -- not a second recovery Event --
+    // showing the capability has returned to Good and stayed there,
+    // advances the pending recovery candidate past dwell and closes
+    // exactly one Incident.
+    let r4 = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Good,
+        base + Duration::from_millis(1100),
+        3,
+    );
+    assert!(matches!(r4.outcome, AdmitOutcome::IncidentClosed(_)));
+    assert_eq!(incident_id_of(&r4.outcome), incident_id);
+    assert_eq!(engine.open_incidents().len(), 0);
+    assert_eq!(
+        engine
+            .closed_incidents()
+            .into_iter()
+            .filter(|i| i.incident_id == incident_id)
+            .count(),
+        1,
+        "exactly one closed incident, never a duplicate"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Gate 2a health-lifecycle repair -- audit-driven confidence-
+// classification correction. The repair TDD's "Target-state
+// classification vs. incident confidence" section requires
+// transition-specific confidence to reach the opened `Incident`:
+//
+//   Available -> Unavailable  => Confidence::Confirmed
+//   Healthy   -> Warning      => Confidence::Probable
+//   sustained Degraded        => Confidence::Unknown
+//   Available + Error         => unresolved, never opens/closes
+//
+// The pre-correction candidate collapsed all actionable directions into
+// a single `HealthDirection::Bad` and hardcoded `Confidence::Confirmed`
+// at every incident-open call site, so `Degraded` and `Available +
+// Warning` incidents opened as `Confirmed` instead of `Unknown`/
+// `Probable`. These tests drive the real production shape (one real
+// `Event`, then a fresh re-observation past dwell via
+// `advance_health_dwell` -- R1) and assert the opened incident's
+// `confidence` field directly.
+// ---------------------------------------------------------------------
+
+#[test]
+fn confidence_sustained_degraded_opens_with_unknown_confidence() {
+    let base = Instant::now();
+    let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+    let capability_id = CapabilityId::new("org.degraded.svc").unwrap();
+
+    let r1 = engine.admit(&ingress(
+        health_event_with_health(
+            "evt-degraded-1",
+            "org.degraded.svc",
+            Availability::Degraded,
+            Health::Error,
+            1,
+        ),
+        base,
+        0,
+        0,
+    ));
+    assert!(matches!(r1.outcome, AdmitOutcome::DebouncePending));
+
+    let r2 = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Bad,
+        base + Duration::from_millis(500),
+        1,
+    );
+    assert!(matches!(r2.outcome, AdmitOutcome::IncidentOpened(_)));
+    let id = incident_id_of(&r2.outcome);
+    let incident = engine
+        .open_incidents()
+        .into_iter()
+        .find(|i| i.incident_id == id)
+        .unwrap();
+    assert_eq!(
+        incident.confidence,
+        Confidence::Unknown,
+        "sustained Degraded has no §4.2-governed confidence tier -- must \
+         open honestly as Confidence::Unknown, never a hardcoded Confirmed"
+    );
+}
+
+#[test]
+fn confidence_available_warning_opens_with_probable_confidence() {
+    let base = Instant::now();
+    let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+    let capability_id = CapabilityId::new("org.warning.svc").unwrap();
+
+    let r1 = engine.admit(&ingress(
+        health_event_with_health(
+            "evt-warning-1",
+            "org.warning.svc",
+            Availability::Available,
+            Health::Warning,
+            1,
+        ),
+        base,
+        0,
+        0,
+    ));
+    assert!(matches!(r1.outcome, AdmitOutcome::DebouncePending));
+
+    let r2 = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Bad,
+        base + Duration::from_millis(500),
+        1,
+    );
+    assert!(matches!(r2.outcome, AdmitOutcome::IncidentOpened(_)));
+    let id = incident_id_of(&r2.outcome);
+    let incident = engine
+        .open_incidents()
+        .into_iter()
+        .find(|i| i.incident_id == id)
+        .unwrap();
+    assert_eq!(
+        incident.confidence,
+        Confidence::Probable,
+        "Healthy->Warning is §4.2's named Probable transition -- must \
+         open as Confidence::Probable, never a hardcoded Confirmed"
+    );
+}
+
+#[test]
+fn confidence_available_to_unavailable_opens_with_confirmed_confidence() {
+    let base = Instant::now();
+    let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+    let capability_id = CapabilityId::new("org.unavailable.svc").unwrap();
+
+    let r1 = engine.admit(&ingress(
+        health_event(
+            "evt-unavail-1",
+            "org.unavailable.svc",
+            Availability::Unavailable,
+            1,
+        ),
+        base,
+        0,
+        0,
+    ));
+    assert!(matches!(r1.outcome, AdmitOutcome::DebouncePending));
+
+    let r2 = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Bad,
+        base + Duration::from_millis(500),
+        1,
+    );
+    assert!(matches!(r2.outcome, AdmitOutcome::IncidentOpened(_)));
+    let id = incident_id_of(&r2.outcome);
+    let incident = engine
+        .open_incidents()
+        .into_iter()
+        .find(|i| i.incident_id == id)
+        .unwrap();
+    assert_eq!(
+        incident.confidence,
+        Confidence::Confirmed,
+        "Available->Unavailable is §4.2's named Confirmed transition"
+    );
+}
+
+#[test]
+fn confidence_available_error_cannot_open_or_close_incident() {
+    let base = Instant::now();
+    let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+
+    // No open incident, no pending candidate: Available+Error must not
+    // open one either.
+    let r1 = engine.admit(&ingress(
+        health_event_with_health(
+            "evt-error-1",
+            "org.error.svc",
+            Availability::Available,
+            Health::Error,
+            1,
+        ),
+        base,
+        0,
+        0,
+    ));
+    assert!(
+        matches!(r1.outcome, AdmitOutcome::Ignored),
+        "Available+Error with no prior incident/candidate must not open \
+         one, got {:?}",
+        r1.outcome
+    );
+    assert_eq!(engine.open_incidents().len(), 0);
+    assert_eq!(engine.debounce_candidate_count(), 0);
+
+    // Now open a real incident (Unavailable), then prove Available+Error
+    // cannot close it either -- neither a false recovery nor a false
+    // further-Bad linkage (mirrors r4_event_driven_available_error_
+    // never_misclassified_as_good, but exercised alongside the confidence
+    // fix for regression safety).
+    let capability_id = CapabilityId::new("org.error.svc").unwrap();
+    let r2 = engine.admit(&ingress(
+        health_event("evt-unavail", "org.error.svc", Availability::Unavailable, 2),
+        base,
+        100,
+        1,
+    ));
+    assert!(matches!(r2.outcome, AdmitOutcome::DebouncePending));
+    let r3 = engine.advance_health_dwell(
+        &capability_id,
+        FreshHealthObservation::Bad,
+        base + Duration::from_millis(600),
+        2,
+    );
+    assert!(matches!(r3.outcome, AdmitOutcome::IncidentOpened(_)));
+    let id = incident_id_of(&r3.outcome);
+
+    let r4 = engine.admit(&ingress(
+        health_event_with_health(
+            "evt-error-2",
+            "org.error.svc",
+            Availability::Available,
+            Health::Error,
+            3,
+        ),
+        base,
+        700,
+        3,
+    ));
+    assert!(
+        matches!(r4.outcome, AdmitOutcome::Ignored),
+        "Available+Error must not close the open incident, got {:?}",
+        r4.outcome
+    );
+    assert_eq!(engine.open_incidents().len(), 1);
+    let incident = engine
+        .open_incidents()
+        .into_iter()
+        .find(|i| i.incident_id == id)
+        .unwrap();
+    assert_eq!(incident.status, IncidentStatus::Open);
+}
+
+// ---------------------------------------------------------------------
+// R7 -- regression: the pre-existing Event-driven dwell-advance path
+// remains valid alongside the new fresh-observation path. A second,
+// genuinely distinct Bad Event still promotes a pending candidate
+// exactly as before this repair.
+// ---------------------------------------------------------------------
+
+#[test]
+fn regression_second_real_bad_event_still_promotes_pending_candidate() {
+    let base = Instant::now();
+    let mut engine = CorrelationEngine::new(policy()); // health_min_dwell = 500ms
+    let r1 = engine.admit(&ingress(
+        health_event("evt-h1", "org.regression.svc", Availability::Unavailable, 1),
+        base,
+        0,
+        0,
+    ));
+    assert!(matches!(r1.outcome, AdmitOutcome::DebouncePending));
+
+    let r2 = engine.admit(&ingress(
+        health_event("evt-h2", "org.regression.svc", Availability::Unavailable, 2),
+        base,
+        500,
+        1,
+    ));
+    assert!(matches!(r2.outcome, AdmitOutcome::IncidentOpened(_)));
+    assert_eq!(engine.open_incidents().len(), 1);
 }
 
 // ---------------------------------------------------------------------
