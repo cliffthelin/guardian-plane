@@ -43,5 +43,17 @@ PrivateNetwork=yes
 PrivateUsers=yes
 UMask=0077
 
+# PSI ingress (P2-EVT-006). systemd opens these paths in PID 1's own
+# namespace and passes the descriptors in, so guardian-daemon can read
+# pressure information while ProcSubset=pid above continues to deny it any
+# /proc/pressure pathname -- no directive is relaxed and no mount is added.
+# :graceful is required: without it a missing path aborts the unit with
+# status=202/FDS before ExecStart, so a PSI-less kernel or container would
+# take the whole daemon down. The daemon resolves these by fd name, never
+# by index, because :graceful renumbers the descriptors that remain.
+OpenFile=/proc/pressure/cpu:psi-cpu:graceful
+OpenFile=/proc/pressure/memory:psi-memory:graceful
+OpenFile=/proc/pressure/io:psi-io:graceful
+
 [Install]
 WantedBy=multi-user.target

@@ -1,0 +1,231 @@
+# Guardian gate manifest — configuration only.
+# Read alongside docs/guardian/30_TDD/GUARDIAN_EXECUTION_PROTOCOL.md.
+# This file carries ownership/scope/evidence configuration for one gate;
+# it is read directly by coding/review agents, not mechanically validated
+# by tooling in this pass.
+#
+# This is a NEW IMPLEMENTATION GATE, not a reopened-gate repair. Unlike
+# phase2-2a-health-lifecycle-repair, phase2-2a-transition-confidence-repair,
+# and phase2-2b-health-lifecycle-integration-repair — each of which
+# reopened an already-owned normative ID and therefore deliberately minted
+# no new ID — this gate covers scope that was **genuinely unowned**: no
+# P2-* ID and no gate manifest (2a/2b/2c) ever assigned ownership of
+# building a live PSI production event path. That ownership gap is the
+# direct consequence of the false factual predicate in TDD contract §51
+# decision item 3 ("PSI events already produced by G8's providers::psi
+# wiring"), corrected by the 2026-09-07 PSI production-wiring
+# governance-repair pass.
+#
+# GOVERNANCE FLAG — REQUIRES EXPLICIT PROJECT-OWNER CONFIRMATION BEFORE
+# EXECUTION. This gate's owned_normative_ids are NEWLY MINTED by that §51
+# revision (see the "PSI production wiring, corrected" subsection and the
+# 2026-09-07 revision-history entry). Minting a normative ID is a
+# governance act. The reasoning for minting rather than attaching to an
+# existing ID is recorded in the linked TDD's "Normative ID decision"
+# section; the owner should confirm it before any code is written.
+#
+# RESOLVED 2026-09-08 (dated owner governance act; this pending flag is
+# left unrewritten per supersede-don't-erase — see TDD_CONTRACT.md §51's
+# "Owner confirmation, resolved" block and revision history, and
+# GUARDIAN_PHASE2_IMPLEMENTATION_HANDOFF.md §19's "Fifth revision note").
+# The owner confirmed the mint with one adjustment: P2-EVT-005,
+# P2-EVT-007, P2-EVT-008, and P2-VM-003 are ACCEPTED; P2-EVT-006 is
+# DEMOTED to acceptance criteria under those three IDs rather than
+# remaining a standalone ID (its requirement text is preserved, not
+# deleted, and now lives in the gate TDD's Phase B section and in
+# ADR-009). owned_normative_ids below is updated to match.
+#
+# Architecture: docs/adr/ADR-009-guardian-psi-producer-topology.md,
+# REVISED 2026-09-07. Read the revised Decision, not the superseded one
+# preserved inside it: there is NO guardian-psi process, NO new service
+# UID, NO new D-Bus interface, and NO new IPC protocol in this gate.
+# Contract Collision record and the real VM evidence this gate builds on:
+# docs/guardian/30_TDD/gates/phase2-psi-production-ingress-preflight.md
+# §9 (OpenFile= experiment) and §10 (collision RESOLVED).
+
+schema_version = 1
+gate_id = "phase2-psi-inherited-descriptor-ingress"
+kind = "new-implementation-gate"
+status = "not-started"
+
+# Newly minted by the TDD contract §51 PSI production-wiring
+# governance-repair pass (2026-09-07); also recorded in
+# GUARDIAN_PHASE2_IMPLEMENTATION_HANDOFF.md §19. Each takes the next
+# unused number in an EXISTING family — no new family, no suffix letters,
+# per §19's own rule. OWNER-CONFIRMED 2026-09-08 (see the RESOLVED note
+# above): P2-EVT-006 removed from this list per its demotion to
+# acceptance criteria under the three IDs below; its requirement text is
+# preserved, unweakened, in the gate TDD's Phase B section (R1-R8) and in
+# ADR-009 — this array change is a governance-status change only, not a
+# scope reduction.
+owned_normative_ids = [
+    "P2-EVT-005",
+    "P2-EVT-007",
+    "P2-EVT-008",
+    "P2-VM-003",
+]
+
+# Explicitly NOT reopened by this gate. Their existing evidence must
+# continue to pass unmodified (regression only), and this gate has no
+# authority to reinterpret any of them:
+#   P2-COR-001/P2-COR-002 — PSI correlation rules (Gate 2a, closed).
+#     This gate produces the events those rules consume; it does not
+#     change how they are correlated.
+#   P2-API-001/002/003    — Gate 2b D-Bus surface and IncidentWire
+#     shape-lock. This gate adds no D-Bus member, no bus name, and no
+#     wire-shape change, so P2-API-002 needs no exception and none is
+#     requested.
+#   P2-VM-001/P2-VM-002   — Gate 2c, accepted and committed.
+regression_only_normative_ids = [
+    "P2-COR-001",
+    "P2-COR-002",
+    "P2-API-001",
+    "P2-API-002",
+    "P2-API-003",
+    "P2-VM-001",
+    "P2-VM-002",
+]
+
+# Commit this manifest was authored against. Confirmed via
+# `git rev-parse HEAD` at authoring time.
+baseline_sha = "4d5df972a4fde6ae788f13e0aac68c38e295a411"
+
+tdd_file = "docs/guardian/30_TDD/gates/phase2-psi-inherited-descriptor-ingress-tdd.md"
+
+# The defect being closed (full detail in the linked TDD): G8 delivered a
+# complete, tested PSI library capability (PsiFileSource / PsiTrigger /
+# PsiEventSource, real /proc/pressure reads, real kernel trigger +
+# poll(POLLPRI)), but guardian-daemon's main() never instantiates it — the
+# only producers wired to admit_event are monitoring_tick and
+# capability_registry_tick, and the sole PsiEventSource construction site
+# workspace-wide is a standalone example binary
+# (crates/guardian-core/examples/g8_psi_trigger_evidence.rs) that no
+# systemd unit runs. No live PSI Event has ever reached the shared
+# production correlation ingress, despite §51 decision item 3 putting PSI
+# correlation affirmatively in scope for TDD-contract Phase 2. The
+# in-daemon repair was blocked by the accepted ProcSubset=pid sandbox
+# until systemd OpenFile= was proven to supply working descriptors from
+# PID 1's namespace without making /proc/pressure visible by pathname.
+defect_summary = "guardian-daemon never instantiates PsiEventSource, so no live PSI Event has ever reached the shared Phase 2 correlation ingress; the library capability exists and is correct, but production wiring for it was never built and was never owned by any P2-* ID or gate."
+
+dependencies = [
+    "phase2-2a",
+    "phase2-2a-health-lifecycle-repair",
+    "phase2-2a-transition-confidence-repair",
+    "phase2-2b",
+    "phase2-2b-health-lifecycle-integration-repair",
+    "phase2-2c",
+]
+
+[allowed_scope]
+paths = [
+    # The library extension this gate is permitted, and no more: explicit
+    # per-resource path resolution on PsiFileSource alongside its existing
+    # base_dir behaviour (e.g. from_paths(...) or a
+    # BTreeMap<PsiResourceKind, PathBuf> consulted by path_for). real(),
+    # at(), read(), path(), PsiTrigger::register, PsiEventSource,
+    # PsiEventDispatcher and all seven existing unit tests must keep
+    # working untouched. No unsafe (workspace sets unsafe_code =
+    # "forbid", Cargo.toml:30) and no new dependency.
+    "crates/guardian-core/src/providers/psi.rs",
+    # The accepted G5 model. IN SCOPE ONLY IF GENUINELY REQUIRED — the
+    # implementer must justify any edit here in the completion report, and
+    # the default expectation is that this file is NOT touched at all: its
+    # parsing/classification semantics are accepted and this gate reuses
+    # them unmodified.
+    "crates/guardian-core/src/psi.rs",
+    # Production instantiation: main(), the PSI thread/loop, listen-fd
+    # parsing (LISTEN_FDS/LISTEN_FDNAMES/LISTEN_PID), and this gate's
+    # tests.
+    "crates/guardian-daemon/**",
+    # Additive OpenFile= lines ONLY — see forbidden_scope for what may not
+    # change in this file.
+    "debian/guardian-daemon.service",
+    "docs/evidence/p2/**",
+    "docs/guardian/30_TDD/gates/phase2-psi-inherited-descriptor-ingress-manifest.toml",
+    "docs/guardian/30_TDD/gates/phase2-psi-inherited-descriptor-ingress-tdd.md",
+]
+
+[forbidden_scope]
+paths = [
+    # Gate 2a, closed. This gate produces the events the correlation
+    # engine consumes; it must consume that engine's API as-is and must
+    # not change classification, debounce, confidence, or incident
+    # semantics to make its own job easier.
+    "crates/guardian-core/src/correlation.rs",
+    "crates/guardian-core/tests/correlation_contract.rs",
+    # Gate 2c — accepted and committed in 4d5df97. Do not read beyond
+    # `git status`, do not touch, do not re-derive.
+    "docs/guardian/30_TDD/gates/phase2-2c-manifest.toml",
+    "docs/guardian/30_TDD/gates/phase2-2c-tdd.md",
+    "docs/evidence/p2/GATE2C_VM_EVIDENCE.md",
+    # guardian-helper is not involved in this design at all: no privileged
+    # write path, no polkit rule, no capability, no helper coupling.
+    "crates/guardian-helper/**",
+    # Wave 1 production mutation — unrelated scope.
+    "crates/guardian-daemon/src/restart_capability.rs",
+    # Client shells — unrelated scope; this gate adds no user-facing API.
+    "crates/guardian-gui/**",
+    "crates/guardian-tui/**",
+    "crates/guardian-cli/**",
+    "crates/guardian-indicator/**",
+    # Frozen wire shape (P2-API-003, not reopened). This gate may cause
+    # incidents to be populated; it must not change how they serialize.
+    "crates/guardian-daemon/src/dbus_surface.rs::IncidentWire-shape",
+    "crates/guardian-client/src/lib.rs::IncidentWire-shape",
+    # Frozen signature (§51 "Severity/wire disposition", not reopened).
+    "crates/guardian-core/src/incident.rs::Incident::link_event-signature",
+    # Other gates' closed repair envelopes.
+    "docs/guardian/30_TDD/gates/phase2-2a-health-lifecycle-repair-manifest.toml",
+    "docs/guardian/30_TDD/gates/phase2-2a-health-lifecycle-repair-tdd.md",
+    "docs/guardian/30_TDD/gates/phase2-2a-transition-confidence-repair-manifest.toml",
+    "docs/guardian/30_TDD/gates/phase2-2a-transition-confidence-repair-tdd.md",
+    "docs/guardian/30_TDD/gates/phase2-2b-manifest.toml",
+    "docs/guardian/30_TDD/gates/phase2-2b-tdd.md",
+    "docs/guardian/30_TDD/gates/phase2-2b-health-lifecycle-integration-repair-manifest.toml",
+    "docs/guardian/30_TDD/gates/phase2-2b-health-lifecycle-integration-repair-tdd.md",
+    # The other hardened unit — untouched by this design.
+    "debian/guardian-helper.service",
+]
+
+required_test_layers = ["layer1", "layer2", "layer4"]
+
+[validation_commands]
+fmt = "cargo fmt --check"
+clippy = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+test = "cargo test --workspace"
+# Expected result of running the above against the UNMODIFIED baseline,
+# before this gate's first change. If it does not match, stop and
+# reconcile before editing anything (execution protocol step 2).
+# Note: the authoring host lacks libadwaita-1-dev, so guardian-gui does
+# not build there — a full-workspace run must be performed on guardian-g9
+# (multipass VM, libadwaita-1-dev present), as prior gates did.
+expected_baseline = "409 passed, 0 failed, 3 ignored (baseline_sha 4d5df97, before this gate's changes)"
+
+required_evidence = [
+    "docs/evidence/p2/ — P2-EVT-005: production instantiation proven, not library capability. Evidence must show guardian-daemon's own production wiring constructing the PSI event path and admitting a real PSI Event through the existing shared admit_event/CorrelationIngress point; a test that only exercises PsiEventSource directly does NOT satisfy this ID, because a capable-but-uninstantiated library is precisely the original defect",
+    "docs/evidence/p2/ — P2-EVT-005: exactly one admission point. No second IngressClock/CorrelationEngine pair is constructed anywhere; the PSI producer feeds the same admit_event call site monitoring_tick and capability_registry_tick already use",
+    "docs/evidence/p2/ — [acceptance criteria under P2-EVT-005/007/008, formerly P2-EVT-006, demoted 2026-09-08]: inherited-descriptor acquisition. LISTEN_PID is validated against the daemon's own PID (a mismatched LISTEN_PID yields no descriptors and no PSI path, never a wrong-process fd); descriptors are resolved by LISTEN_FDNAMES name, never by fixed index; a name-order permutation and a partial (:graceful) descriptor set both resolve correctly",
+    "docs/evidence/p2/ — [acceptance criteria under P2-EVT-005/007/008, formerly P2-EVT-006, demoted 2026-09-08]: trigger registration through an inherited descriptor succeeds, and the SAME descriptor also serves the dispatch-time pressure-text re-read (both roles, one fd) — through one owned open file description, not independent reopens (acceptance repair R7)",
+    "docs/evidence/p2/ — [acceptance criteria under P2-EVT-005/007/008, formerly P2-EVT-006, demoted 2026-09-08]: EBUSY at trigger registration is a hard, observable error for that resource — never silently swallowed, never retried in place (triggers are per-open-file-description; re-arming requires a fresh description)",
+    "docs/evidence/p2/ — [acceptance criteria under P2-EVT-005/007/008, formerly P2-EVT-006, demoted 2026-09-08]: restart/reinitialization obtains a fresh open file description and re-registers successfully; no reliance on a descriptor store (FileDescriptorStoreMax is not set and must not be added)",
+    "docs/evidence/p2/ — P2-EVT-007: daemon-owned classification. The severity reaching CorrelationEngine::classify() is derived by the daemon from raw PSI text it read itself; no self-reported severity from any external source exists anywhere in the path",
+    "docs/evidence/p2/ — P2-EVT-007: real PSI Guardian Event construction — event_type psi_threshold_crossing, resource_refs == [\"/proc/pressure/{resource}\"] (preserving §4.1's corrected correlation identity), daemon-owned EventId and ingress timestamp/order",
+    "docs/evidence/p2/ — P2-EVT-007: shared Phase 2 ingress admission and correlation behaviour — a PSI Critical crossing opens an incident per P2-COR-001, and a second same-resource crossing within the window links to it per P2-COR-002 (regression against Gate 2a's unmodified engine, not a reinterpretation of it)",
+    "docs/evidence/p2/ — P2-EVT-008: a missing descriptor produces a truthful PsiReading::Unavailable and never 'no pressure'; the daemon starts and runs normally with zero PSI descriptors present",
+    "docs/evidence/p2/ — P2-EVT-008: malformed, non-finite (NaN/inf), and out-of-range raw PSI values are rejected at the parse/classification boundary and never cross any internal boundary as a valid measurement; none of them can produce an admitted Event",
+    "docs/evidence/p2/ — P2-EVT-008: provider-health behaviour is unaffected — Gate 2b/2b-repair provider-health tests pass unmodified, and a PSI failure degrades PSI observability only",
+    "docs/evidence/p2/ — P2-VM-003: real-VM evidence from the real production systemd unit (never cargo run) covering every item in the TDD's Phase F list, with raw command output sufficient for independent reproduction",
+    "Regression: P2-COR-001/002, P2-API-001/002/003, P2-VM-001/002 evidence continues to pass unmodified",
+    "Regression: all seven existing crates/guardian-core/src/providers/psi.rs unit tests pass unmodified",
+]
+
+commit_policy = "leave-uncommitted-for-independent-review"
+
+# Additional binding constraints on debian/guardian-daemon.service, which
+# is in allowed_scope but only for one specific, additive change. Stated
+# separately because "the file is allowed" is not the same as "any edit to
+# it is allowed".
+[unit_file_constraints]
+allowed_delta = "Up to three additive `OpenFile=` lines (one per monitored PSI resource), each using the `:graceful` option and a stable fd name. Nothing else."
+forbidden_delta = "No existing directive may be removed, relaxed, reordered, or re-valued. ProcSubset=pid and ProtectProc=invisible in particular MUST remain exactly as accepted at G7/G9. FileDescriptorStoreMax MUST NOT be added (see the TDD's FD-store staleness defect, R5). No BindPaths=/BindReadOnlyPaths= of any kind."

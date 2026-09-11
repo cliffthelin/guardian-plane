@@ -20,6 +20,7 @@ use guardian_core::correlation::{
     AdmitOutcome, CorrelationEngine, CorrelationPolicy, FreshHealthObservation, IngressClock,
 };
 use guardian_core::providers::health::HealthTransitionProducer;
+use guardian_core::providers::psi::{PsiAvailability, PsiFileSource};
 use guardian_daemon::dbus_surface::{
     self, CAPABILITIES_OBJECT_PATH, Capabilities1, INCIDENTS_OBJECT_PATH, Incidents1,
     TRANSACTIONS_OBJECT_PATH, Transactions1,
@@ -446,7 +447,11 @@ fn p2_2b_dbus_contract_suite() {
             .object_server()
             .at(
                 CAPABILITIES_OBJECT_PATH,
-                Capabilities1::new(Arc::clone(&capabilities_snapshot)),
+                Capabilities1::new(
+                    Arc::clone(&capabilities_snapshot),
+                    Arc::new(Mutex::new(PsiAvailability::default())),
+                    PsiFileSource::from_paths(std::iter::empty()),
+                ),
             )
             .unwrap();
         connection

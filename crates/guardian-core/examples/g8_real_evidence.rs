@@ -134,7 +134,7 @@ async fn udisks_evidence(connection: &Connection) {
 
 async fn registry_evidence(connection: &Connection) {
     section("Capability Registry (handoff §11)");
-    let records = registry::populate_registry(connection).await;
+    let records = registry::populate_registry(connection, None).await;
     for record in &records {
         println!(
             "  {} <- {} availability={:?} health={:?} read={} write={} authz={:?} priv={:?} iface={:?}",

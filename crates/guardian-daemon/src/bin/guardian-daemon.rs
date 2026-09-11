@@ -72,7 +72,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use guardian_core::budget::{self, FreeSpaceState};
@@ -81,9 +81,12 @@ use guardian_core::correlation::{
 };
 use guardian_core::event::Event;
 use guardian_core::providers::health::HealthTransitionProducer;
+use guardian_core::providers::psi::{PsiAvailability, PsiResourceStatus};
 use guardian_core::providers::udisks::{TopologyTracker, UdisksProvider};
+use guardian_core::psi::{PressureSeverity, SeverityThresholds};
 use guardian_core::recorder::BoundedRecorder;
 use guardian_core::risk::Risk;
+use guardian_daemon::psi_ingress::{self, PsiMonitorConfig, PsiResourceMonitor};
 use guardian_daemon::{GuardianContract, dbus_surface};
 use guardian_provider_api::{CapabilityRecord, EventId, ProviderId};
 
@@ -221,9 +224,18 @@ fn capability_registry_tick(
     health_producer: &mut HealthTransitionProducer,
     ingress_clock: &Mutex<IngressClock>,
     engine: &Mutex<CorrelationEngine>,
+    psi_availability: &Mutex<PsiAvailability>,
 ) -> Vec<CapabilityRecord> {
+    // Acceptance-repair Blocker 4: the registry observes the SAME live
+    // per-resource PSI state `psi_ingress`'s production path maintains
+    // (Blocker 3) -- it never re-probes `/proc/pressure` by pathname,
+    // which the accepted `ProcSubset=pid` sandbox denies unconditionally
+    // from inside this daemon. Snapshotted (cloned) here, outside the
+    // lock, so the lock is never held across the `.await` below.
+    let psi_snapshot = psi_availability.lock().unwrap().clone();
     let records = async_io::block_on(guardian_core::providers::registry::populate_registry(
         connection,
+        Some(&psi_snapshot),
     ));
     let available = records
         .iter()
@@ -295,6 +307,247 @@ fn replace_registry_snapshot(
     *snapshot.lock().unwrap() = records;
 }
 
+/// Production PSI trigger/classification parameters. `avg10` is the
+/// percentage of the last ten seconds during which work was stalled on the
+/// resource, so these are percentages: sustained 20% stall is elevated,
+/// sustained 50% is critical. The kernel trigger asks to be woken when
+/// 100ms of stall accumulates within a 2s window — frequent enough to
+/// observe a real transition, far above the kernel's 500ms minimum window.
+const PSI_MONITOR_CONFIG: PsiMonitorConfig = PsiMonitorConfig {
+    thresholds: SeverityThresholds::new(20.0, 50.0),
+    // `Critical`, not `Elevated` (2026-09-07 threshold repair; see
+    // `docs/evidence/p2/PHASE2_PSI_INHERITED_DESCRIPTOR_INGRESS_EVIDENCE.md`
+    // §F.15 Finding 1). `classify()` (`correlation.rs`, Gate 2a, forbidden
+    // scope) opens a PSI incident only for `Risk::High`/`Critical`,  but
+    // `ThresholdMonitor::observe` reports a crossing only relative to
+    // `event_threshold` -- with `event_threshold = Elevated`, an
+    // `Elevated -> Critical` transition emits nothing (both readings are
+    // already above the Elevated threshold), so a `Risk::High` event could
+    // only ever come from a single-step `Nominal -> Critical` observation.
+    // `avg10` is a 10-second kernel EWMA sampled at most once per
+    // `trigger_window_us` below (2s in production), so that single step is
+    // arithmetically unreachable under sustained real stall (from `x =
+    // 20`, one 2s step reaches at most `20 + 80*(1 - e^-0.2) = 34.5`, still
+    // short of the 50.0 Critical threshold at any load) -- proven on the
+    // real VM: 70s of CPU pressure peaking at `avg10=98.97` opened zero
+    // incidents. Setting `event_threshold = Critical` makes the monitored
+    // boundary match the boundary `classify()` actually cares about: any
+    // transition crossing into or out of Critical emits, however
+    // gradually pressure arrived there, without widening
+    // `trigger_window_us` (which would only paper over the deeper
+    // mismatch, not fix it -- see the evidence document's Finding 1 for
+    // the full analysis of why widening the window was rejected).
+    event_threshold: PressureSeverity::Critical,
+    trigger_threshold_us: 100_000,
+    trigger_window_us: 2_000_000,
+};
+
+/// A descriptor that reports readiness without `POLLPRI` this many times
+/// in a row is not behaving like a kernel PSI trigger. The worker stops
+/// rather than spinning: `P1-PSI-004` forbids a busy loop, and a silent
+/// hot loop would be worse than an honest loss of PSI observability.
+const PSI_MAX_CONSECUTIVE_IDLE_WAKES: u32 = 64;
+
+/// One iteration's result for a PSI worker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PsiStepOutcome {
+    /// A real crossing was classified and admitted through the shared
+    /// ingress. Carries the admitted event's id for operational logging.
+    Admitted(EventId),
+    /// A real wake that the accepted G5 monitor decided was not a crossing.
+    NoCrossing,
+    /// The wait returned without a `POLLPRI` event (timeout, or a
+    /// descriptor that does not behave like a PSI trigger).
+    Idle,
+    /// A hard failure for this resource.
+    Failed,
+}
+
+/// The third instance of this binary's established producer pattern
+/// (`monitoring_tick`, `capability_registry_tick`): a worker thread per PSI
+/// resource, each feeding the one shared `IngressClock`/`CorrelationEngine`
+/// admission point through [`admit_event`].
+///
+/// Returns the number of monitors actually started (so startup logging and
+/// tests can observe it — zero is a normal outcome, not an error: a
+/// PSI-less kernel, a container, or `OpenFile=`'s `:graceful` option
+/// dropping absent paths all produce it, and the daemon runs normally with
+/// PSI simply reported unavailable rather than silently reported as "no
+/// pressure") together with the **shared, truthful, per-resource**
+/// [`PsiAvailability`] state (acceptance-repair Blocker 3) — the same
+/// state `main()` threads into [`capability_registry_tick`] so the
+/// Capability Registry (Blocker 4) observes exactly what this function's
+/// own startup/runtime logging observes, never a second, independent
+/// probe.
+fn spawn_psi_ingress(
+    plan: &psi_ingress::PsiDescriptorPlan,
+    ingress_clock: &Arc<Mutex<IngressClock>>,
+    engine: &Arc<Mutex<CorrelationEngine>>,
+) -> (usize, Arc<Mutex<PsiAvailability>>) {
+    let report = psi_ingress::start_psi_monitors(plan, PSI_MONITOR_CONFIG);
+
+    for failure in &report.failures {
+        eprintln!("[guardian-daemon] {failure}");
+    }
+    let started = report.monitors.len();
+
+    // Acceptance-repair Blocker 3: truthful, individual per-resource
+    // reporting -- never a single aggregate "N/M monitored" line that
+    // cannot say *which* resource is missing. cpu/memory/io are each
+    // reported explicitly, every startup, whether available or not.
+    let availability = Arc::new(Mutex::new(psi_ingress::availability_from_startup(
+        plan, &report,
+    )));
+    for (kind, name) in psi_ingress::PSI_MONITORED_RESOURCES {
+        let status = availability
+            .lock()
+            .unwrap()
+            .get(kind)
+            .cloned()
+            .unwrap_or(PsiResourceStatus::NoDescriptor);
+        eprintln!(
+            "[guardian-daemon] PSI {name}: {} ({})",
+            if status.is_available() {
+                "available"
+            } else {
+                "unavailable"
+            },
+            status.reason()
+        );
+    }
+    eprintln!(
+        "[guardian-daemon] PSI ingress: {started}/{} inherited descriptors monitored ({} failed)",
+        report.attempts,
+        report.failures.len()
+    );
+
+    for monitor in report.monitors {
+        let ingress_clock = Arc::clone(ingress_clock);
+        let engine = Arc::clone(engine);
+        let availability = Arc::clone(&availability);
+        std::thread::spawn(move || {
+            psi_ingress_loop(monitor, &ingress_clock, &engine, &availability);
+        });
+    }
+    (started, availability)
+}
+
+/// One PSI resource's worker loop. Parks in the kernel on
+/// `poll(POLLPRI)` — never a sleep-and-recheck loop — and exits on a hard
+/// failure for its resource rather than retrying: a PSI trigger belongs to
+/// its open file description, so re-arming in place is impossible and
+/// re-registering on the same description would only return `EBUSY`. Every
+/// exit path updates `availability` for **this resource only**
+/// (acceptance-repair Blocker 3) before returning, so the daemon's
+/// truthful per-resource state — and, through it, the Capability Registry
+/// (Blocker 4) — reflects a later runtime failure, not only the startup
+/// snapshot.
+fn psi_ingress_loop(
+    mut monitor: PsiResourceMonitor,
+    ingress_clock: &Mutex<IngressClock>,
+    engine: &Mutex<CorrelationEngine>,
+    availability: &Mutex<PsiAvailability>,
+) {
+    let kind = monitor.kind();
+    let mut consecutive_idle = 0u32;
+    loop {
+        match psi_ingress_step(&mut monitor, None, ingress_clock, engine) {
+            PsiStepOutcome::Admitted(_) | PsiStepOutcome::NoCrossing => consecutive_idle = 0,
+            PsiStepOutcome::Idle => {
+                consecutive_idle += 1;
+                if consecutive_idle >= PSI_MAX_CONSECUTIVE_IDLE_WAKES {
+                    let reason = "descriptor never reports POLLPRI; worker stopped rather than \
+                                   spinning"
+                        .to_owned();
+                    eprintln!(
+                        "[guardian-daemon] PSI {kind:?} {reason} (PSI observability lost \
+                         for this resource until restart)"
+                    );
+                    availability
+                        .lock()
+                        .unwrap()
+                        .set(kind, PsiResourceStatus::Degraded(reason));
+                    return;
+                }
+            }
+            PsiStepOutcome::Failed => {
+                let reason =
+                    "worker stopped after a hard failure; a PSI trigger cannot be re-armed \
+                     in place"
+                        .to_owned();
+                eprintln!(
+                    "[guardian-daemon] PSI {kind:?} {reason} (PSI observability lost for \
+                     this resource until restart)"
+                );
+                availability
+                    .lock()
+                    .unwrap()
+                    .set(kind, PsiResourceStatus::Degraded(reason));
+                return;
+            }
+        }
+    }
+}
+
+/// One worker iteration: wait in the kernel, then dispatch. Split out from
+/// the loop so the dispatch half is drivable in a test without pretending a
+/// fixture file supports `POLLPRI`.
+fn psi_ingress_step(
+    monitor: &mut PsiResourceMonitor,
+    timeout: Option<Duration>,
+    ingress_clock: &Mutex<IngressClock>,
+    engine: &Mutex<CorrelationEngine>,
+) -> PsiStepOutcome {
+    match monitor.wait(timeout) {
+        Ok(true) => dispatch_psi_wake(monitor, ingress_clock, engine),
+        Ok(false) => PsiStepOutcome::Idle,
+        Err(error) => {
+            eprintln!(
+                "[guardian-daemon] PSI {:?} trigger wait failed: {error}",
+                monitor.kind()
+            );
+            PsiStepOutcome::Failed
+        }
+    }
+}
+
+/// The daemon-owned half of the PSI path: re-read live pressure text
+/// through this resource's own inherited descriptor, classify it with the
+/// accepted, unmodified G5 classifier, and admit any resulting `Event`
+/// through the **existing** single admission point.
+///
+/// Every authority field is daemon-owned. Nothing outside this process
+/// supplies, influences, or self-reports a severity: the severity is
+/// derived here from raw bytes this daemon read itself, and no IPC,
+/// environment variable, file, or D-Bus message carries one in. The ingress
+/// timestamp and ingress order come from the shared [`IngressClock`] at
+/// [`admit_event`] time, never from a producer.
+fn dispatch_psi_wake(
+    monitor: &mut PsiResourceMonitor,
+    ingress_clock: &Mutex<IngressClock>,
+    engine: &Mutex<CorrelationEngine>,
+) -> PsiStepOutcome {
+    match monitor.dispatch_wake() {
+        Ok(Some(event)) => {
+            let event_id = event.event_id.clone();
+            admit_event(ingress_clock, engine, event);
+            PsiStepOutcome::Admitted(event_id)
+        }
+        Ok(None) => PsiStepOutcome::NoCrossing,
+        Err(error) => {
+            // A malformed, non-finite, or out-of-range reading lands here
+            // as a typed error. It is reported and dropped -- it must never
+            // become an admitted Event, and must never be silently treated
+            // as "no pressure".
+            eprintln!(
+                "[guardian-daemon] PSI {:?} reading rejected: {error}",
+                monitor.kind()
+            );
+            PsiStepOutcome::Failed
+        }
+    }
+}
+
 fn main() -> zbus::Result<()> {
     let state = state_dir();
     fs::create_dir_all(&state).expect("create daemon state directory");
@@ -328,6 +581,34 @@ fn main() -> zbus::Result<()> {
         }
     });
 
+    // Gate `phase2-psi-inherited-descriptor-ingress` (`P2-EVT-005`): the
+    // live PSI producer. Until this call existed, `guardian-core`'s
+    // complete and correct `providers::psi` capability was never
+    // instantiated by any production call site, so no live PSI `Event` had
+    // ever reached the shared correlation ingress. Its worker threads feed
+    // the same `ingress_clock`/`engine` pair constructed above, through the
+    // same `admit_event` point the two producers above use.
+    // `psi_descriptor_plan_from_env` is called exactly once: as of the
+    // final acceptance repair (Part B) it has the side effect of setting
+    // real `FD_CLOEXEC` on every raw inherited descriptor via the
+    // canonical `libsystemd` acquisition path (see `psi_ingress`'s module
+    // doc), so it must not be called redundantly. `spawn_psi_ingress`'s
+    // monitors and `psi_file_source` below (fed to `Capabilities1::
+    // psi_summary` so it reads through the exact same inherited
+    // descriptors `psi_ingress`'s own monitors read through, never a
+    // second, independent `/proc/pressure` pathname probe — the root
+    // cause of the live `ListCapabilities`/`PsiSummary` contradiction the
+    // re-review reproduced) both derive from this one plan.
+    let psi_plan = psi_ingress::psi_descriptor_plan_from_env();
+    let psi_file_source = psi_plan.file_source();
+    let (psi_monitors, psi_availability) = spawn_psi_ingress(&psi_plan, &ingress_clock, &engine);
+    if psi_monitors == 0 {
+        eprintln!(
+            "[guardian-daemon] no PSI descriptors inherited; PSI is reported unavailable \
+             (never 'no pressure') and every other producer is unaffected"
+        );
+    }
+
     // A second, genuine system-bus connection dedicated to the G8
     // Capability Registry's six read-only provider proxies — kept
     // entirely separate from the `Guardian1`-serving connection below, so
@@ -337,6 +618,7 @@ fn main() -> zbus::Result<()> {
     let registry_snapshot_for_thread = std::sync::Arc::clone(&registry_snapshot);
     let ingress_clock_for_registry = std::sync::Arc::clone(&ingress_clock);
     let engine_for_registry = std::sync::Arc::clone(&engine);
+    let psi_availability_for_registry = Arc::clone(&psi_availability);
     std::thread::spawn(move || {
         let mut topology_tracker = TopologyTracker::new();
         let mut health_producer = HealthTransitionProducer::new();
@@ -353,6 +635,7 @@ fn main() -> zbus::Result<()> {
                             &mut health_producer,
                             &ingress_clock_for_registry,
                             &engine_for_registry,
+                            &psi_availability_for_registry,
                         ),
                     );
                     if let Ok(topology) =
@@ -384,7 +667,11 @@ fn main() -> zbus::Result<()> {
         .serve_at(OBJECT_PATH, GuardianContract::default())?
         .serve_at(
             dbus_surface::CAPABILITIES_OBJECT_PATH,
-            dbus_surface::Capabilities1::new(std::sync::Arc::clone(&registry_snapshot)),
+            dbus_surface::Capabilities1::new(
+                std::sync::Arc::clone(&registry_snapshot),
+                Arc::clone(&psi_availability),
+                psi_file_source,
+            ),
         )?
         .serve_at(
             dbus_surface::INCIDENTS_OBJECT_PATH,
@@ -407,7 +694,8 @@ fn main() -> zbus::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        admit_event, advance_health_dwell_for_snapshot, monitoring_tick, probe_free_space,
+        PSI_MONITOR_CONFIG, PsiStepOutcome, admit_event, advance_health_dwell_for_snapshot,
+        dispatch_psi_wake, monitoring_tick, probe_free_space, psi_ingress_step,
         replace_registry_snapshot,
     };
     use guardian_core::budget::FreeSpaceState;
@@ -417,12 +705,21 @@ mod tests {
     };
     use guardian_core::event::Event;
     use guardian_core::providers::health::HealthTransitionProducer;
+    use guardian_core::psi::{
+        PressureSeverity, PsiLine, PsiReading, PsiResourceKind, SeverityThresholds, classify,
+    };
     use guardian_core::recorder::BoundedRecorder;
     use guardian_core::risk::Risk;
+    use guardian_daemon::psi_ingress::{
+        PSI_FD_NAME_CPU, PSI_FD_NAME_IO, PSI_FD_NAME_MEMORY, PsiDescriptorPlan, PsiResourceMonitor,
+        resolve_psi_descriptors, start_psi_monitors,
+    };
     use guardian_provider_api::{
         Availability, BootAvailability, CapabilityId, CapabilityRecord, DiagnosticCost, EventId,
         Health, InterfaceKind, Knowledge, PrivilegeRequirement, ProviderId,
     };
+    use std::fs::File;
+    use std::os::fd::AsRawFd;
     use std::sync::Mutex;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -577,7 +874,7 @@ mod tests {
     #[test]
     fn registry_snapshot_is_replaced_not_retained_after_outage() {
         let snapshot = Mutex::new(vec![
-            guardian_core::providers::registry::psi_capabilities().remove(0),
+            guardian_core::providers::registry::psi_capabilities(None).remove(0),
         ]);
         replace_registry_snapshot(&snapshot, Vec::new());
         assert!(snapshot.lock().unwrap().is_empty());
@@ -743,5 +1040,922 @@ mod tests {
             0,
             "a capability absent from this tick's snapshot must not be promoted this tick"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Gate `phase2-psi-inherited-descriptor-ingress`
+    // (`P2-EVT-005`/`P2-EVT-006`/`P2-EVT-007`/`P2-EVT-008`)
+    //
+    // Every test below drives the *production* functions `main()` calls --
+    // `start_psi_monitors`, `psi_ingress_step`, `dispatch_psi_wake` -- never
+    // a test-only reimplementation. The complementary structural proof that
+    // `main()` actually calls them lives in
+    // `tests/phase2_psi_ingress_contract.rs`.
+    // -----------------------------------------------------------------
+
+    const PSI_NOMINAL: &str = "some avg10=0.10 avg60=0.05 avg300=0.01 total=1000\n";
+    const PSI_ELEVATED: &str = "some avg10=31.00 avg60=12.00 avg300=4.00 total=2000\n";
+    const PSI_CRITICAL: &str = "some avg10=81.00 avg60=44.00 avg300=17.00 total=3000\n";
+
+    /// Builds the `LISTEN_PID`/`LISTEN_FDS`/`LISTEN_FDNAMES` triple systemd
+    /// would set, naming a descriptor **this process really holds** at the
+    /// index that maps to its real fd number (descriptors start at fd 3, in
+    /// `LISTEN_FDNAMES` order).
+    ///
+    /// This is the "faithful local equivalent" the gate TDD's R6 permits:
+    /// production `resolve_psi_descriptors` and everything downstream of it
+    /// runs completely unmodified; only the descriptor's provenance differs
+    /// (a test-opened file rather than PID 1's `OpenFile=`). Whether the
+    /// *kernel* honours a trigger on a genuinely inherited PSI descriptor
+    /// was proven empirically in the preflight and is re-proven on real
+    /// hardware in Phase F.
+    fn listen_fd_env(files: &[(&File, &str)]) -> (String, String, String) {
+        let highest = files
+            .iter()
+            .map(|(file, _)| file.as_raw_fd())
+            .max()
+            .expect("at least one descriptor");
+        assert!(highest >= 3, "inherited descriptors start at fd 3");
+        let count = usize::try_from(highest - 2).unwrap();
+        let mut names: Vec<String> = (0..count)
+            .map(|index| format!("unrelated-{index}"))
+            .collect();
+        for (file, fd_name) in files {
+            let index = usize::try_from(file.as_raw_fd() - 3).unwrap();
+            names[index] = (*fd_name).to_owned();
+        }
+        (
+            std::process::id().to_string(),
+            count.to_string(),
+            names.join(":"),
+        )
+    }
+
+    fn plan_for(files: &[(&File, &str)]) -> PsiDescriptorPlan {
+        let (pid, fds, names) = listen_fd_env(files);
+        let plan =
+            resolve_psi_descriptors(Some(&pid), Some(&fds), Some(&names), std::process::id());
+        // Fail loudly rather than silently degrading into an empty plan
+        // (which would make every downstream assertion in the caller read
+        // as "the production path did nothing" for an unrelated reason --
+        // e.g. the test binary's fd table having grown past the resolver's
+        // fail-closed LISTEN_FDS bound while tests run in parallel).
+        assert_eq!(
+            plan.len(),
+            files.len(),
+            "the synthesized listen-fd environment must resolve every named descriptor \
+             (LISTEN_FDS={fds}, LISTEN_FDNAMES={names})"
+        );
+        plan
+    }
+
+    /// Opens a fixture as a read/write descriptor, exactly as `OpenFile=`'s
+    /// default `rw` mode does.
+    fn psi_fixture(dir: &std::path::Path, name: &str, text: &str) -> (std::path::PathBuf, File) {
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open PSI fixture read/write");
+        (path, file)
+    }
+
+    /// The kernel's own PSI decayed-average update
+    /// (`Documentation/accounting/psi.rst`; `kernel/sched/psi.c`'s
+    /// per-class EWMA), used below to build fixture trajectories a real
+    /// `/proc/pressure` file could actually produce over time.
+    /// `PSI_NOMINAL`/`PSI_ELEVATED`/`PSI_CRITICAL` above are deliberately
+    /// instantaneous jumps -- fine for the shape/wiring tests that use
+    /// them, but exactly the kind of fixture that let the Finding-1 defect
+    /// (production PSI incidents unreachable under any real trajectory)
+    /// survive undetected. `target_pct` is the stalled percentage
+    /// sustained for `elapsed_secs` (100.0 under continuous full stall,
+    /// 0.0 once stall stops); `tau_secs` is the averaging class's own time
+    /// constant (10 / 60 / 300 for `avg10`/`avg60`/`avg300`).
+    fn kernel_psi_ewma_step(
+        previous: f64,
+        target_pct: f64,
+        elapsed_secs: f64,
+        tau_secs: f64,
+    ) -> f64 {
+        let factor = 1.0 - (-elapsed_secs / tau_secs).exp();
+        previous + (target_pct - previous) * factor
+    }
+
+    /// Ties fixture generation to the real production sampling cadence at
+    /// compile time: the fastest a real kernel PSI trigger can wake this
+    /// daemon for one resource is once per
+    /// `PSI_MONITOR_CONFIG.trigger_window_us`. If that production constant
+    /// ever changes, this assertion fails the build rather than silently
+    /// leaving `TRAJECTORY_STEP_SECS` -- and therefore every derived
+    /// fixture below -- physically stale.
+    const _: () = assert!(PSI_MONITOR_CONFIG.trigger_window_us == 2_000_000);
+    const TRAJECTORY_STEP_SECS: f64 = 2.0;
+
+    /// All three decayed averages advanced together by one real production
+    /// sampling interval. Only `avg10` is ever classified
+    /// (`providers/psi.rs`'s `present_severity` calls
+    /// `classify(resource.some, ..)`, and `classify` reads only `avg10`),
+    /// but a fixture claiming to be physically realizable must be
+    /// realizable on every field it writes, not merely the one field
+    /// production happens to read.
+    #[derive(Clone, Copy, Debug)]
+    struct PsiAverages {
+        avg10: f64,
+        avg60: f64,
+        avg300: f64,
+    }
+
+    impl PsiAverages {
+        const fn steady(value: f64) -> Self {
+            Self {
+                avg10: value,
+                avg60: value,
+                avg300: value,
+            }
+        }
+
+        /// Advances every average by one `TRAJECTORY_STEP_SECS` real
+        /// sampling interval toward `target_pct`.
+        fn step(self, target_pct: f64) -> Self {
+            Self {
+                avg10: kernel_psi_ewma_step(self.avg10, target_pct, TRAJECTORY_STEP_SECS, 10.0),
+                avg60: kernel_psi_ewma_step(self.avg60, target_pct, TRAJECTORY_STEP_SECS, 60.0),
+                avg300: kernel_psi_ewma_step(self.avg300, target_pct, TRAJECTORY_STEP_SECS, 300.0),
+            }
+        }
+
+        fn line(self, total: u64) -> String {
+            format!(
+                "some avg10={:.2} avg60={:.2} avg300={:.2} total={total}\n",
+                self.avg10, self.avg60, self.avg300
+            )
+        }
+
+        fn severity(self, thresholds: SeverityThresholds) -> PressureSeverity {
+            classify(
+                PsiLine {
+                    avg10: self.avg10,
+                    avg60: self.avg60,
+                    avg300: self.avg300,
+                    total: 0,
+                },
+                thresholds,
+            )
+        }
+    }
+
+    /// `P2-EVT-005` R12 + `P2-EVT-006` R3/R6: the production startup
+    /// function registers exactly one monitor per inherited descriptor,
+    /// with exactly one registration attempt per resource (no retry loop --
+    /// there is no in-place re-arm for a PSI trigger).
+    #[test]
+    fn psi_startup_registers_exactly_one_monitor_per_inherited_descriptor() {
+        let dir = temp_dir("psi-startup-one-per-descriptor");
+        let (_, cpu) = psi_fixture(&dir, "cpu", PSI_NOMINAL);
+        let (_, io) = psi_fixture(&dir, "io", PSI_NOMINAL);
+        let plan = plan_for(&[(&cpu, PSI_FD_NAME_CPU), (&io, PSI_FD_NAME_IO)]);
+        assert_eq!(plan.len(), 2, "one descriptor per monitored resource");
+
+        let report = start_psi_monitors(&plan, PSI_MONITOR_CONFIG);
+        assert_eq!(
+            report.attempts, 2,
+            "exactly one registration attempt per planned resource -- never retried in place"
+        );
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.monitors.len(), 2);
+        let kinds: Vec<PsiResourceKind> = report
+            .monitors
+            .iter()
+            .map(PsiResourceMonitor::kind)
+            .collect();
+        assert_eq!(kinds, [PsiResourceKind::Cpu, PsiResourceKind::Io]);
+    }
+
+    /// `P2-EVT-006` R7 -- the non-obvious requirement a trigger-only design
+    /// would silently fail. `PsiEventDispatcher::dispatch_wake` re-reads the
+    /// pressure text *by pathname*; under `ProcSubset=pid` a
+    /// `/proc/pressure/...` pathname returns `Unavailable`, so the re-read
+    /// must go through the same inherited descriptor the trigger was
+    /// registered on. Here the trigger is registered first (which really
+    /// writes the kernel ABI payload), the pressure text is then restored as
+    /// a live kernel file would carry it, and the wake still classifies.
+    #[test]
+    fn one_inherited_descriptor_serves_both_the_trigger_and_the_content_reread() {
+        let dir = temp_dir("psi-one-fd-both-roles");
+        let (path, cpu) = psi_fixture(&dir, "cpu", PSI_NOMINAL);
+        let plan = plan_for(&[(&cpu, PSI_FD_NAME_CPU)]);
+        let descriptor_path = plan.path(PsiResourceKind::Cpu).unwrap().to_path_buf();
+        assert!(
+            descriptor_path.starts_with("/proc/self/fd/"),
+            "the resolved path must be the in-process descriptor path, got {}",
+            descriptor_path.display()
+        );
+
+        // Role 1: content re-read through the descriptor, *before* the
+        // trigger exists.
+        let source = plan.file_source();
+        assert!(matches!(
+            source.read(PsiResourceKind::Cpu).unwrap(),
+            PsiReading::Present(_)
+        ));
+
+        // Role 2: real trigger registration on that same descriptor.
+        let mut report = start_psi_monitors(&plan, PSI_MONITOR_CONFIG);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        let mut monitor = report.monitors.remove(0);
+
+        // Role 1 again, *after* registration -- the case that fails
+        // catastrophically and silently if the re-read used a pathname.
+        std::fs::write(&path, PSI_CRITICAL).unwrap();
+        assert!(matches!(
+            source.read(PsiResourceKind::Cpu).unwrap(),
+            PsiReading::Present(_)
+        ));
+        let event = monitor
+            .dispatch_wake()
+            .expect("the re-read must succeed through the inherited descriptor")
+            .expect("a Nominal -> Critical crossing must produce an event");
+        assert_eq!(event.severity, Risk::High);
+    }
+
+    /// Acceptance-repair Blocker 1/2, on the production `PsiResourceMonitor`
+    /// type itself (not just the library primitives it composes): the
+    /// monitor's trigger and dispatcher share the *exact* open file
+    /// description of the single `OwnedPsiFile` `PsiResourceMonitor::
+    /// register` opened, and that descriptor is close-on-exec. Before this
+    /// repair, `PsiResourceMonitor::register` built a `PsiFileSource` from
+    /// the descriptor path and let the dispatcher/trigger each open it
+    /// independently (the dispatcher's own baseline read, the trigger's
+    /// registration, and every subsequent `dispatch_wake` each performed
+    /// their own fresh `open()` of `/proc/self/fd/N`) -- this test would
+    /// have failed against that implementation, because independent
+    /// reopens of the same magic-symlink path are independent open file
+    /// descriptions on Linux.
+    #[test]
+    fn the_production_monitor_registers_trigger_and_dispatch_through_one_owned_descriptor() {
+        let dir = temp_dir("psi-one-owned-descriptor");
+        let (_, cpu) = psi_fixture(&dir, "cpu", PSI_NOMINAL);
+        let plan = plan_for(&[(&cpu, PSI_FD_NAME_CPU)]);
+        let mut report = start_psi_monitors(&plan, PSI_MONITOR_CONFIG);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        let monitor = report.monitors.remove(0);
+        assert!(
+            monitor.shares_one_open_file_description(),
+            "the production PsiResourceMonitor must register its trigger and read every \
+             dispatch through the exact same owned open file description"
+        );
+        assert!(
+            monitor.is_close_on_exec(),
+            "the production monitor's owned descriptor must be close-on-exec"
+        );
+    }
+
+    /// `P2-EVT-007` R11/R10: a real crossing produces the accepted Guardian
+    /// `Event` shape, with the daemon owning every authority field.
+    ///
+    /// Crosses straight to `PSI_CRITICAL` (not `PSI_ELEVATED`, as an
+    /// earlier version of this test did) because the 2026-09-07
+    /// `event_threshold` repair (`PSI_MONITOR_CONFIG`, Finding 1 in
+    /// `docs/evidence/p2/
+    /// PHASE2_PSI_INHERITED_DESCRIPTOR_INGRESS_EVIDENCE.md`) means a bare
+    /// `Nominal -> Elevated` reading is no longer a reportable crossing at
+    /// all -- `ThresholdMonitor` now only reports crossings of the
+    /// Critical boundary, so this is the shape a real production crossing
+    /// can actually take today. `gradual_ewma_trajectory_crosses_into_
+    /// critical_only_at_the_real_boundary_and_opens_incident` above covers
+    /// the gradual/multi-step shape of the same boundary.
+    #[test]
+    fn a_real_crossing_produces_the_accepted_psi_event_shape() {
+        let dir = temp_dir("psi-event-shape");
+        let (path, cpu) = psi_fixture(&dir, "cpu", PSI_NOMINAL);
+        let mut report =
+            start_psi_monitors(&plan_for(&[(&cpu, PSI_FD_NAME_CPU)]), PSI_MONITOR_CONFIG);
+        let mut monitor = report.monitors.remove(0);
+
+        std::fs::write(&path, PSI_CRITICAL).unwrap();
+        let event = monitor.dispatch_wake().unwrap().unwrap();
+
+        assert_eq!(event.event_type, "psi_threshold_crossing");
+        assert_eq!(event.resource_refs, ["/proc/pressure/cpu"]);
+        assert_eq!(event.severity, Risk::High);
+        assert_eq!(
+            event.normalized_key,
+            "psi cpu threshold crossing nominal->critical"
+        );
+        assert_eq!(event.attributes["from"], "Nominal");
+        assert_eq!(event.attributes["to"], "Critical");
+        assert_eq!(
+            event.source_provider.as_str(),
+            "guardian.g8.psi",
+            "the accepted G8 provider identity, unchanged by this gate"
+        );
+    }
+
+    /// `P2-EVT-007` R10: correlation identity is the stable kernel resource
+    /// path, never the volatile `/proc/self/fd/N` descriptor path the daemon
+    /// happens to have read through. Asserted for every resource kind.
+    #[test]
+    fn resource_identity_is_the_kernel_path_not_the_descriptor_path() {
+        let dir = temp_dir("psi-resource-identity");
+        for (fixture, fd_name, kind, expected) in [
+            (
+                "cpu",
+                PSI_FD_NAME_CPU,
+                PsiResourceKind::Cpu,
+                "/proc/pressure/cpu",
+            ),
+            (
+                "memory",
+                PSI_FD_NAME_MEMORY,
+                PsiResourceKind::Memory,
+                "/proc/pressure/memory",
+            ),
+            (
+                "io",
+                PSI_FD_NAME_IO,
+                PsiResourceKind::Io,
+                "/proc/pressure/io",
+            ),
+        ] {
+            let (path, file) = psi_fixture(&dir, fixture, PSI_NOMINAL);
+            let plan = plan_for(&[(&file, fd_name)]);
+            assert!(
+                plan.path(kind).unwrap().starts_with("/proc/self/fd/"),
+                "the read path is the descriptor path"
+            );
+            let mut report = start_psi_monitors(&plan, PSI_MONITOR_CONFIG);
+            let mut monitor = report.monitors.remove(0);
+            std::fs::write(&path, PSI_CRITICAL).unwrap();
+            let event = monitor.dispatch_wake().unwrap().unwrap();
+            assert_eq!(
+                event.resource_refs,
+                [expected],
+                "but the correlation identity is the stable kernel path"
+            );
+        }
+    }
+
+    /// `P2-EVT-005` R13: PSI events reach correlation through the **same**
+    /// `admit_event` call site `monitoring_tick` and the provider-health
+    /// producer use, sharing one strictly increasing ingress sequence. Same
+    /// technique as
+    /// `monitoring_tick_and_a_second_source_share_one_monotonically_increasing_ingress_sequence`.
+    #[test]
+    fn psi_events_share_the_one_ingress_sequence_with_the_other_producers() {
+        let dir = temp_dir("psi-shared-ingress");
+        let (path, cpu) = psi_fixture(&dir, "cpu", PSI_NOMINAL);
+        let mut report =
+            start_psi_monitors(&plan_for(&[(&cpu, PSI_FD_NAME_CPU)]), PSI_MONITOR_CONFIG);
+        let mut monitor = report.monitors.remove(0);
+        let (ingress_clock, engine) = shared_ingress();
+        let recorder = Mutex::new(BoundedRecorder::new(8).unwrap());
+
+        monitoring_tick(&recorder, &dir, &ingress_clock, &engine);
+        assert_eq!(ingress_clock.lock().unwrap().sequence(), 1);
+
+        std::fs::write(&path, PSI_CRITICAL).unwrap();
+        assert!(matches!(
+            dispatch_psi_wake(&mut monitor, &ingress_clock, &engine),
+            PsiStepOutcome::Admitted(_)
+        ));
+        assert_eq!(
+            ingress_clock.lock().unwrap().sequence(),
+            2,
+            "the PSI producer must continue the one shared ingress sequence"
+        );
+
+        admit_event(&ingress_clock, &engine, sample_health_event(0, "available"));
+        assert_eq!(ingress_clock.lock().unwrap().sequence(), 3);
+        assert_eq!(engine.lock().unwrap().admitted_ingress_count(), 3);
+    }
+
+    /// `P2-EVT-007` R14 / `P2-COR-001` + `P2-COR-002`, regressed against
+    /// Gate 2a's **unmodified** engine: a PSI `Critical` crossing opens an
+    /// incident; a later `Critical` crossing for the same
+    /// `resource_refs.first()` within the window links to it instead of
+    /// opening a second one.
+    #[test]
+    fn a_psi_critical_crossing_opens_an_incident_and_the_next_one_links_to_it() {
+        let dir = temp_dir("psi-correlation");
+        let (path, cpu) = psi_fixture(&dir, "cpu", PSI_NOMINAL);
+        let mut report =
+            start_psi_monitors(&plan_for(&[(&cpu, PSI_FD_NAME_CPU)]), PSI_MONITOR_CONFIG);
+        let mut monitor = report.monitors.remove(0);
+        let (ingress_clock, engine) = shared_ingress();
+
+        std::fs::write(&path, PSI_CRITICAL).unwrap();
+        assert!(matches!(
+            dispatch_psi_wake(&mut monitor, &ingress_clock, &engine),
+            PsiStepOutcome::Admitted(_)
+        ));
+        let opened = engine.lock().unwrap().open_incidents();
+        assert_eq!(opened.len(), 1, "a Critical PSI crossing opens an incident");
+        let incident_id = opened[0].incident_id.clone();
+        assert_eq!(
+            opened[0].primary_resource.as_deref(),
+            Some("/proc/pressure/cpu")
+        );
+
+        // Recovery below the event threshold: a real crossing, but
+        // `Risk::Observe` -- deliberately ignored by Gate 2a's rule.
+        std::fs::write(&path, PSI_NOMINAL).unwrap();
+        assert!(matches!(
+            dispatch_psi_wake(&mut monitor, &ingress_clock, &engine),
+            PsiStepOutcome::Admitted(_)
+        ));
+        assert_eq!(engine.lock().unwrap().open_incidents().len(), 1);
+
+        // A second Critical crossing for the same resource, inside the
+        // window.
+        std::fs::write(&path, PSI_CRITICAL).unwrap();
+        assert!(matches!(
+            dispatch_psi_wake(&mut monitor, &ingress_clock, &engine),
+            PsiStepOutcome::Admitted(_)
+        ));
+        let after = engine.lock().unwrap().open_incidents();
+        assert_eq!(
+            after.len(),
+            1,
+            "a same-resource Critical crossing inside the window must link, not open a second incident"
+        );
+        assert_eq!(after[0].incident_id, incident_id);
+        assert!(
+            after[0].event_ids.len() >= 2,
+            "the second crossing must be linked to the existing incident, got {:?}",
+            after[0].event_ids
+        );
+    }
+
+    /// `P2-EVT-007`/`P2-COR-001` regression, encoding Finding 1's root
+    /// cause directly (`docs/evidence/p2/
+    /// PHASE2_PSI_INHERITED_DESCRIPTOR_INGRESS_EVIDENCE.md` §F.15): a
+    /// **physically realizable** gradual trajectory (`Nominal -> Elevated
+    /// -> higher Elevated -> Critical`, each step produced by
+    /// `kernel_psi_ewma_step` at the real production sampling interval,
+    /// never an instantaneous jump like `PSI_NOMINAL`->`PSI_CRITICAL`
+    /// above) must still classify the `Elevated -> Critical` step as
+    /// `Risk::High` and open exactly one incident, and the Elevated-entry
+    /// step must never itself fabricate a Critical event or incident.
+    ///
+    /// Before the repair (`event_threshold: PressureSeverity::Elevated`)
+    /// this is RED for the documented reason:
+    /// `ThresholdMonitor::observe` never reports an `Elevated -> Critical`
+    /// transition, because both readings are already above the Elevated
+    /// threshold (`was_above == is_above`) -- so this exact, physically
+    /// realizable trajectory produces zero `Risk::High` events and opens
+    /// zero incidents, reproducing the real VM's 70-second/`avg10=98.97`
+    /// zero-incident control run in a deterministic unit test.
+    #[test]
+    fn gradual_ewma_trajectory_crosses_into_critical_only_at_the_real_boundary_and_opens_incident()
+    {
+        let dir = temp_dir("psi-gradual-ewma-critical");
+
+        let nominal = PsiAverages::steady(15.0);
+        let elevated_entry = nominal.step(100.0);
+        let elevated_higher = elevated_entry.step(100.0);
+        let critical = elevated_higher.step(100.0);
+
+        let thresholds = PSI_MONITOR_CONFIG.thresholds;
+        assert_eq!(
+            nominal.severity(thresholds),
+            PressureSeverity::Nominal,
+            "test setup: trajectory must start Nominal"
+        );
+        assert_eq!(
+            elevated_entry.severity(thresholds),
+            PressureSeverity::Elevated,
+            "test setup: one real EWMA step from Nominal under sustained 100% stall must land \
+             Elevated, never jump straight to Critical (Finding 1's arithmetic ceiling)"
+        );
+        assert_eq!(
+            elevated_higher.severity(thresholds),
+            PressureSeverity::Elevated,
+            "test setup: the second step must still classify Elevated -- this is the exact \
+             Elevated -> Elevated -> Critical shape ThresholdMonitor::observe cannot see across \
+             under the old config"
+        );
+        assert_eq!(
+            critical.severity(thresholds),
+            PressureSeverity::Critical,
+            "test setup: the third step must actually reach Critical"
+        );
+
+        let (path, cpu) = psi_fixture(&dir, "cpu", &nominal.line(1000));
+        let mut report =
+            start_psi_monitors(&plan_for(&[(&cpu, PSI_FD_NAME_CPU)]), PSI_MONITOR_CONFIG);
+        let mut monitor = report.monitors.remove(0);
+        let (ingress_clock, engine) = shared_ingress();
+
+        // Nominal -> Elevated: whether this is itself reported depends on
+        // `event_threshold`, but either way it must never be reported as
+        // Critical/`Risk::High`, and it must never open an incident.
+        std::fs::write(&path, elevated_entry.line(1001)).unwrap();
+        if let Some(event) = monitor.dispatch_wake().unwrap() {
+            assert_ne!(
+                event.severity,
+                Risk::High,
+                "entering Elevated must never itself fabricate a Critical event"
+            );
+            admit_event(&ingress_clock, &engine, event);
+        }
+        assert!(
+            engine.lock().unwrap().open_incidents().is_empty(),
+            "no incident may exist before Critical is actually reached"
+        );
+
+        // Elevated -> higher Elevated: same severity class both times, so
+        // `ThresholdMonitor` must report no crossing at all.
+        std::fs::write(&path, elevated_higher.line(1002)).unwrap();
+        assert_eq!(
+            monitor.dispatch_wake().unwrap(),
+            None,
+            "no threshold crossing between two readings that both classify Elevated"
+        );
+        assert!(engine.lock().unwrap().open_incidents().is_empty());
+
+        // Elevated -> Critical: the transition Finding 1 proved the
+        // production config could never observe under a real trajectory.
+        std::fs::write(&path, critical.line(1003)).unwrap();
+        let event = monitor
+            .dispatch_wake()
+            .unwrap()
+            .expect("a gradual Elevated -> Critical crossing must still produce an event");
+        assert_eq!(
+            event.severity,
+            Risk::High,
+            "the Elevated -> Critical crossing must classify as Critical/Risk::High"
+        );
+        assert_eq!(event.resource_refs, ["/proc/pressure/cpu"]);
+        admit_event(&ingress_clock, &engine, event);
+        let opened = engine.lock().unwrap().open_incidents();
+        assert_eq!(
+            opened.len(),
+            1,
+            "a gradual, physically realizable Elevated -> Critical crossing must open an \
+             incident (P2-COR-001), reproducing the real VM's control run failing this exact \
+             way before the repair"
+        );
+        assert_eq!(
+            opened[0].primary_resource.as_deref(),
+            Some("/proc/pressure/cpu")
+        );
+    }
+
+    /// `P2-EVT-007` reverse-boundary regression: the recovery direction
+    /// (`Critical -> Elevated`), decayed by the same real EWMA formula
+    /// (`target_pct = 0.0`, stall relieved) rather than an instantaneous
+    /// drop. The repaired `event_threshold: PressureSeverity::Critical`
+    /// watches exactly this boundary, so recovery must remain observable
+    /// as a real event -- and admitting it must not disturb the
+    /// already-open incident: Gate 2a's engine (`correlation.rs`,
+    /// forbidden scope) closes PSI incidents by its debounce window
+    /// elapsing, never by an explicit recovery reading (any non-`Risk::
+    /// High` PSI event is `Ignored` by `classify()`), so this also
+    /// regresses that accepted dwell/close behaviour against a physically
+    /// realizable recovery reading instead of an untested one.
+    #[test]
+    fn gradual_ewma_recovery_crossing_critical_to_elevated_remains_observable_without_disturbing_the_open_incident()
+     {
+        let dir = temp_dir("psi-gradual-ewma-recovery");
+
+        let nominal = PsiAverages::steady(15.0);
+        let critical = nominal.step(100.0).step(100.0).step(100.0);
+        let recovered = critical.step(0.0);
+        let thresholds = PSI_MONITOR_CONFIG.thresholds;
+        assert_eq!(
+            critical.severity(thresholds),
+            PressureSeverity::Critical,
+            "test setup: must actually reach Critical before testing recovery from it"
+        );
+        assert_eq!(
+            recovered.severity(thresholds),
+            PressureSeverity::Elevated,
+            "test setup: one real decay step down from Critical must land Elevated, not \
+             Nominal -- this is the boundary the repaired config watches"
+        );
+
+        let (path, cpu) = psi_fixture(&dir, "cpu", &nominal.line(2000));
+        let mut report =
+            start_psi_monitors(&plan_for(&[(&cpu, PSI_FD_NAME_CPU)]), PSI_MONITOR_CONFIG);
+        let mut monitor = report.monitors.remove(0);
+        let (ingress_clock, engine) = shared_ingress();
+
+        std::fs::write(&path, critical.line(2001)).unwrap();
+        let opening_event = monitor
+            .dispatch_wake()
+            .unwrap()
+            .expect("Nominal -> Critical must open the incident");
+        assert_eq!(opening_event.severity, Risk::High);
+        admit_event(&ingress_clock, &engine, opening_event);
+        let opened = engine.lock().unwrap().open_incidents();
+        assert_eq!(opened.len(), 1);
+        let incident_id = opened[0].incident_id.clone();
+
+        std::fs::write(&path, recovered.line(2002)).unwrap();
+        let recovery_event = monitor
+            .dispatch_wake()
+            .unwrap()
+            .expect("the Critical -> Elevated recovery boundary must remain observable");
+        assert_eq!(recovery_event.attributes["from"], "Critical");
+        assert_eq!(recovery_event.attributes["to"], "Elevated");
+        assert_ne!(
+            recovery_event.severity,
+            Risk::High,
+            "recovery must never itself report Critical"
+        );
+        admit_event(&ingress_clock, &engine, recovery_event);
+
+        let after = engine.lock().unwrap().open_incidents();
+        assert_eq!(
+            after.len(),
+            1,
+            "the recovery reading must not open a second incident or close the existing one"
+        );
+        assert_eq!(
+            after[0].incident_id, incident_id,
+            "the same incident must remain open, undisturbed by the recovery reading (Gate 2a \
+             closes by window elapsing, not by a recovery signal)"
+        );
+    }
+
+    /// `P2-EVT-007` R9: the severity that reaches `CorrelationEngine::
+    /// classify()` is a pure function of the raw PSI bytes the daemon read
+    /// through its own descriptor. Nothing else can influence it: the only
+    /// input changed between these two runs is the file's contents.
+    ///
+    /// Uses one Nominal-baseline run crossing up into Critical and one
+    /// Critical-baseline run crossing down into Elevated (rather than two
+    /// Nominal-baseline runs, one of which used to stop at `PSI_ELEVATED`)
+    /// because the 2026-09-07 `event_threshold` repair means a bare
+    /// `Nominal -> Elevated` reading no longer reaches `dispatch_wake` as
+    /// a reportable crossing at all -- see the comment on
+    /// `a_real_crossing_produces_the_accepted_psi_event_shape` above. The
+    /// two runs still differ only in the file contents each independently
+    /// reads, which is exactly the property this test proves.
+    #[test]
+    fn psi_severity_is_derived_only_from_the_bytes_the_daemon_read_itself() {
+        let dir = temp_dir("psi-severity-provenance");
+        let mut severities = Vec::new();
+        for (fixture, baseline, text) in [
+            ("a", PSI_NOMINAL, PSI_CRITICAL),
+            ("b", PSI_CRITICAL, PSI_ELEVATED),
+        ] {
+            let (path, file) = psi_fixture(&dir, fixture, baseline);
+            let mut report =
+                start_psi_monitors(&plan_for(&[(&file, PSI_FD_NAME_CPU)]), PSI_MONITOR_CONFIG);
+            let mut monitor = report.monitors.remove(0);
+            std::fs::write(&path, text).unwrap();
+            severities.push(monitor.dispatch_wake().unwrap().unwrap().severity);
+        }
+        assert_eq!(
+            severities,
+            [Risk::High, Risk::Moderate],
+            "severity must track the raw bytes alone -- there is no other input to track"
+        );
+    }
+
+    /// `P2-EVT-006` R15: a restart re-acquires descriptors and re-registers
+    /// from scratch. Each start produces an independent monitor with a fresh
+    /// open file description and no carried-over threshold state -- the
+    /// second start's first crossing is detected exactly as the first
+    /// start's was, rather than being suppressed as "already Critical".
+    #[test]
+    fn restarting_the_psi_producer_re_registers_with_no_carried_over_state() {
+        let dir = temp_dir("psi-restart");
+        let (path, cpu) = psi_fixture(&dir, "cpu", PSI_NOMINAL);
+
+        let mut first =
+            start_psi_monitors(&plan_for(&[(&cpu, PSI_FD_NAME_CPU)]), PSI_MONITOR_CONFIG);
+        assert!(first.failures.is_empty(), "{:?}", first.failures);
+        let mut first_monitor = first.monitors.remove(0);
+        std::fs::write(&path, PSI_CRITICAL).unwrap();
+        assert!(first_monitor.dispatch_wake().unwrap().is_some());
+        drop(first_monitor);
+
+        // Restart: the old description is gone, so re-registration must
+        // succeed (a stale reused description would be EBUSY on a real
+        // kernel -- Phase F proves that half on real hardware).
+        std::fs::write(&path, PSI_NOMINAL).unwrap();
+        let mut second =
+            start_psi_monitors(&plan_for(&[(&cpu, PSI_FD_NAME_CPU)]), PSI_MONITOR_CONFIG);
+        assert!(
+            second.failures.is_empty(),
+            "re-registration after restart must succeed: {:?}",
+            second.failures
+        );
+        let mut second_monitor = second.monitors.remove(0);
+        std::fs::write(&path, PSI_CRITICAL).unwrap();
+        assert!(
+            second_monitor.dispatch_wake().unwrap().is_some(),
+            "the restarted producer must observe its own fresh baseline, not inherit one"
+        );
+    }
+
+    /// `P2-EVT-008` R16: with zero descriptors the daemon starts and runs
+    /// normally -- no monitors, no failures, and every other producer
+    /// unaffected.
+    #[test]
+    fn the_daemon_runs_normally_with_zero_psi_descriptors() {
+        let empty = resolve_psi_descriptors(None, None, None, std::process::id());
+        assert!(empty.is_empty());
+
+        let report = start_psi_monitors(&empty, PSI_MONITOR_CONFIG);
+        assert_eq!(report.attempts, 0);
+        assert!(report.monitors.is_empty());
+        assert!(report.failures.is_empty());
+
+        let dir = temp_dir("psi-zero-descriptors");
+        let recorder = Mutex::new(BoundedRecorder::new(4).unwrap());
+        let (ingress_clock, engine) = shared_ingress();
+        monitoring_tick(&recorder, &dir, &ingress_clock, &engine);
+        assert_eq!(engine.lock().unwrap().admitted_ingress_count(), 1);
+    }
+
+    /// `P2-EVT-008` R16 / `P2-EVT-006` R2, the `:graceful` case: when only
+    /// some `OpenFile=` paths existed, the absent resource must read as a
+    /// truthful `Unavailable` -- never "no pressure", and never bound to a
+    /// neighbouring resource's descriptor.
+    #[test]
+    fn a_partial_graceful_descriptor_set_leaves_the_absent_resource_unavailable() {
+        let dir = temp_dir("psi-partial-graceful");
+        let (_, cpu) = psi_fixture(&dir, "cpu", PSI_NOMINAL);
+        let (_, io) = psi_fixture(&dir, "io", PSI_CRITICAL);
+        let plan = plan_for(&[(&cpu, PSI_FD_NAME_CPU), (&io, PSI_FD_NAME_IO)]);
+
+        assert!(plan.path(PsiResourceKind::Memory).is_none());
+        let source = plan.file_source();
+        assert_eq!(
+            source.read(PsiResourceKind::Memory).unwrap(),
+            PsiReading::Unavailable,
+            "an absent descriptor is truthfully Unavailable, never 'no pressure'"
+        );
+        assert!(matches!(
+            source.read(PsiResourceKind::Cpu).unwrap(),
+            PsiReading::Present(_)
+        ));
+
+        let report = start_psi_monitors(&plan, PSI_MONITOR_CONFIG);
+        assert_eq!(report.monitors.len(), 2);
+        assert!(report.failures.is_empty());
+    }
+
+    /// `P2-EVT-008` R17: malformed, non-finite and out-of-range raw PSI
+    /// values are rejected at the read/classification boundary, so none of
+    /// them can ever become an admitted `Event`.
+    #[test]
+    fn invalid_raw_psi_values_never_produce_an_admitted_event() {
+        let dir = temp_dir("psi-invalid-values");
+        for (name, text) in [
+            ("malformed", "not a psi line at all\n"),
+            ("nan", "some avg10=NaN avg60=0 avg300=0 total=9\n"),
+            ("infinite", "some avg10=inf avg60=0 avg300=0 total=9\n"),
+            ("negative", "some avg10=-3.0 avg60=0 avg300=0 total=9\n"),
+            ("above-range", "some avg10=140.0 avg60=0 avg300=0 total=9\n"),
+        ] {
+            let (path, file) = psi_fixture(&dir, name, PSI_NOMINAL);
+            let mut report =
+                start_psi_monitors(&plan_for(&[(&file, PSI_FD_NAME_CPU)]), PSI_MONITOR_CONFIG);
+            let mut monitor = report.monitors.remove(0);
+            let (ingress_clock, engine) = shared_ingress();
+
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(
+                dispatch_psi_wake(&mut monitor, &ingress_clock, &engine),
+                PsiStepOutcome::Failed,
+                "{name}: an invalid raw value must surface as a typed failure"
+            );
+            assert_eq!(
+                engine.lock().unwrap().admitted_ingress_count(),
+                0,
+                "{name}: no Event may be admitted from an invalid raw PSI value"
+            );
+            assert_eq!(ingress_clock.lock().unwrap().sequence(), 0);
+        }
+    }
+
+    /// `P2-EVT-008` R18 / `P2-EVT-006` R8: a PSI resource whose descriptor
+    /// cannot be registered is reported as a hard, observable failure and is
+    /// simply not monitored -- it never becomes a silently-unpollable source,
+    /// it never stops the other PSI resources, and it never touches the
+    /// provider-health path.
+    #[test]
+    fn a_psi_registration_failure_degrades_psi_observability_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("psi-registration-failure");
+        let (_, good) = psi_fixture(&dir, "cpu", PSI_NOMINAL);
+
+        // A descriptor that is readable but NOT trigger-capable: the kernel
+        // PSI ABI requires O_RDWR (the trigger is written to the same fd
+        // that is later polled), so a read-only descriptor reads fine and
+        // then fails registration for real. This is a genuine kernel-level
+        // failure, and unlike closing a descriptor it cannot be perturbed by
+        // fd-number reuse from a concurrently running test.
+        let bad_path = dir.join("io");
+        std::fs::write(&bad_path, PSI_NOMINAL).unwrap();
+        std::fs::set_permissions(&bad_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let bad = File::options().read(true).open(&bad_path).unwrap();
+
+        let plan = plan_for(&[(&good, PSI_FD_NAME_CPU), (&bad, PSI_FD_NAME_IO)]);
+        let report = start_psi_monitors(&plan, PSI_MONITOR_CONFIG);
+        assert_eq!(
+            report.attempts, 2,
+            "one attempt per resource, never retried"
+        );
+        assert_eq!(
+            report.monitors.len(),
+            1,
+            "the healthy resource still starts"
+        );
+        assert_eq!(
+            report.failures.len(),
+            1,
+            "the failure is observable, not swallowed"
+        );
+        assert_eq!(report.failures[0].resource(), PsiResourceKind::Io);
+
+        // Provider-health production is entirely unaffected.
+        let (ingress_clock, engine) = shared_ingress();
+        let mut health_producer = HealthTransitionProducer::new();
+        let baseline = vec![capability_record(
+            "systemd.unit.state",
+            Availability::Available,
+            Health::Healthy,
+        )];
+        assert!(health_producer.observe(&baseline).is_empty());
+        let bad_snapshot = vec![capability_record(
+            "systemd.unit.state",
+            Availability::Unavailable,
+            Health::Error,
+        )];
+        let events = health_producer.observe(&bad_snapshot);
+        assert_eq!(events.len(), 1);
+        for event in events {
+            admit_event(&ingress_clock, &engine, event);
+        }
+        assert_eq!(engine.lock().unwrap().admitted_ingress_count(), 1);
+    }
+
+    /// `P2-EVT-006` R8, the classification half: `EBUSY` at trigger
+    /// registration means a trigger already exists on that open file
+    /// description. Triggers are per-description, so there is no in-place
+    /// re-arm -- it must be reported as a hard error for that resource, never
+    /// as a benign retry condition. (The real kernel `EBUSY` itself was
+    /// proven empirically in the preflight and is re-proven in Phase F; what
+    /// is under test here is that the daemon classifies it as hard.)
+    #[test]
+    fn ebusy_at_registration_is_classified_as_a_hard_error() {
+        use guardian_daemon::psi_ingress::PsiRegistrationError;
+        let busy = PsiRegistrationError::from_io(
+            PsiResourceKind::Cpu,
+            std::io::Error::from_raw_os_error(16),
+        );
+        assert!(busy.is_busy());
+        assert!(
+            busy.is_hard(),
+            "EBUSY must never be treated as retryable in place"
+        );
+
+        let other = PsiRegistrationError::from_io(
+            PsiResourceKind::Io,
+            std::io::Error::from(std::io::ErrorKind::NotFound),
+        );
+        assert!(!other.is_busy());
+        assert!(
+            other.is_hard(),
+            "every registration failure is hard for its resource -- PSI never retries in place"
+        );
+    }
+
+    /// `P2-EVT-005` R12/R13: the production worker-loop *step* -- the exact
+    /// function `psi_ingress_loop` calls each iteration -- is exercised end
+    /// to end, including its kernel wait. A regular-file descriptor never
+    /// reports `POLLPRI`, so the step reports `Idle` rather than
+    /// manufacturing an event: the daemon only ever emits on a real kernel
+    /// wake.
+    #[test]
+    fn the_production_worker_step_never_manufactures_an_event_without_a_wake() {
+        let dir = temp_dir("psi-worker-step");
+        let (path, cpu) = psi_fixture(&dir, "cpu", PSI_NOMINAL);
+        let mut report =
+            start_psi_monitors(&plan_for(&[(&cpu, PSI_FD_NAME_CPU)]), PSI_MONITOR_CONFIG);
+        let mut monitor = report.monitors.remove(0);
+        let (ingress_clock, engine) = shared_ingress();
+
+        std::fs::write(&path, PSI_CRITICAL).unwrap();
+        assert_eq!(
+            psi_ingress_step(
+                &mut monitor,
+                Some(std::time::Duration::from_millis(1)),
+                &ingress_clock,
+                &engine,
+            ),
+            PsiStepOutcome::Idle,
+            "no POLLPRI wake means no event, even though the pressure text crossed"
+        );
+        assert_eq!(engine.lock().unwrap().admitted_ingress_count(), 0);
     }
 }

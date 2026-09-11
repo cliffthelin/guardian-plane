@@ -13,6 +13,15 @@ path = "src/bin/guardian-daemon.rs"
 async-io = "2.6.0"
 guardian-core = { path = "../guardian-core" }
 guardian-provider-api = { path = "../guardian-provider-api" }
+# Canonical systemd listen-fd acquisition (final acceptance repair, Part
+# B): real FD_CLOEXEC on every raw inherited descriptor, matching
+# sd_listen_fds()'s documented contract, without adding `unsafe` to this
+# workspace (`unsafe_code = "forbid"`, root Cargo.toml). Pure Rust (no
+# libsystemd.so link, no pkg-config build step); see
+# crates/guardian-daemon/src/psi_ingress.rs's module doc for the full
+# dependency evaluation (candidates considered, why this one was
+# selected, and the one canonical-protocol gap it does not close).
+libsystemd = "0.7.2"
 zbus = { workspace = true, features = ["blocking-api"] }
 
 [dev-dependencies]

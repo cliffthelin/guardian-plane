@@ -62,7 +62,7 @@ conflict exists between §47 and any other governing document.
 | Event normalization/ordering | G3 (`crates/guardian-core/src/event.rs`); TDD §17 | Reused, not re-derived | Yes | `Event`, `normalize_key`, `sort_by_monotonic_order` — production types, no producer gap | None; Phase 2 only consumes these |
 | Incident envelope | G3 (`crates/guardian-core/src/incident.rs`); TDD §18 | In scope (correlation *produces* these) | Yes | `Incident`, `IncidentStatus`, `Confidence`, `link_event`, `set_confidence` — types exist, fully tested, **never constructed by production code** (confirmed: only test/fixture call sites exist workspace-wide) | A correlation engine that constructs/updates real `Incident`s. **Corrected (repair pass):** no `severity` field is added to `Incident` in this phase (severity deferred in full — see §15) and `link_event`'s `(&mut self, event_id: EventId)` signature is genuinely unchanged, not merely claimed unchanged |
 | Correlation engine (event→incident grouping) | §47; this planning pass | In scope | Yes | None — no correlation logic exists anywhere in the workspace | New Layer-1 module, `guardian-core::correlation` (name TBD at implementation) |
-| PSI events | G5/G8 (`crates/guardian-core/src/psi.rs`, `providers/psi.rs`) | Correlation input, in scope | Yes | Real `/proc/pressure` reads, `ThresholdMonitor`, produces real `Event`s via `poll()` — production-wired since G8 | Correlating these events into incidents (net-new) |
+| PSI events | G5/G8 (`crates/guardian-core/src/psi.rs`, `providers/psi.rs`) | Correlation input, in scope | Yes | ~~Real `/proc/pressure` reads, `ThresholdMonitor`, produces real `Event`s via `poll()` — **production-wired since G8**~~. **Corrected (PSI production-wiring governance-repair pass, 2026-09-07):** "production-wired since G8" is **false** — verified by reading `crates/guardian-daemon/src/bin/guardian-daemon.rs` directly. G8 delivered a complete, tested PSI *library* capability (`PsiFileSource`/`PsiTrigger`/`PsiEventSource`, real `/proc/pressure` reads, real kernel trigger + `poll(POLLPRI)`), but `main()` never instantiates it: the only two producers wired to `admit_event` are `monitoring_tick` and `capability_registry_tick`, and the sole `PsiEventSource` construction site in the workspace is a standalone example binary (`crates/guardian-core/examples/g8_psi_trigger_evidence.rs`), not part of any systemd-managed production process. This is the structurally identical defect to the provider-health row below, and is corrected the same way | ~~Correlating these events into incidents (net-new)~~. **Corrected (same pass):** correlating them is *not* the only gap — the live PSI `Event` **producer itself** must be stood up in `guardian-daemon` and fed through the existing shared `admit_event`/`CorrelationIngress` point. **In scope for this phase, NOT deferred** (TDD contract §51, "PSI production wiring, corrected"); owned by `P2-EVT-005..008`/`P2-VM-003` and the gate `docs/guardian/30_TDD/gates/phase2-psi-inherited-descriptor-ingress-manifest.toml` |
 | Provider health/availability transitions | G3 `Availability`/`Health` (`guardian-provider-api/src/capability.rs`); G8 six providers | Correlation input, in scope | Yes | `CapabilityRecord` populated by real G8 provider ticks in `guardian-daemon`'s `capability_registry_tick` | **Corrected (repair pass):** `capability_registry_tick` returns `CapabilityRecord` snapshots only — verified by reading `crates/guardian-daemon/src/bin/guardian-daemon.rs` directly, no `Event` of any kind is produced for provider-health today. This is not "needs detection logic atop an existing event" — it needs a new provider-health transition *`Event` producer* (diffing successive snapshots) in addition to the detection/debounce logic that consumes it |
 | `Incidents1` D-Bus surface | G9 (`crates/guardian-daemon/src/dbus_surface.rs`) | In scope — Phase 2 populates it | Yes | Interface, object path, `IncidentWire`, `guardian_client::Incident` all shipped; `list_incidents()` hard-coded to `Vec::new()` | Wire it to the correlation engine's live incident store |
 | `Transactions1` D-Bus surface | G9 dbus_surface.rs; Wave 1 helper-private persistence | **Deferred** (§12) | Yes (if pursued) | Interface/wire shape shipped, `TransactionWire` exists; helper-private state under `root:root` is the only real transaction persistence | A typed read bridge is an explicit future architectural decision, not implied by this planning pass |
@@ -108,10 +108,10 @@ existence only if §12's typed read bridge is separately approved later
 
 | Primitive | Exists? | Production caller? | Persisted? | Publicly exposed? | Correlatable? | Phase 2 gap |
 |---|---|---|---|---|---|---|
-| `Event` | Yes (G3) | Yes — PSI (`providers/psi.rs`), daemon monitoring tick (`guardian-daemon.rs:132`) | No (memory only, via recorder) | No (no `Events1` interface exists or is proposed) | Yes — `normalized_key`, `source_provider` already present. **Corrected (repair pass):** `timestamp_monotonic` is *not* cross-producer comparable (PSI's is a sequence counter, the daemon tick's is wall-clock seconds) — correlation uses the new ingress order (§6), and `timestamp_monotonic` is provenance-only | Needs a consumer that groups them, ordered by ingress, not by `timestamp_monotonic` |
+| `Event` | Yes (G3) | ~~Yes — PSI (`providers/psi.rs`), daemon monitoring tick (`guardian-daemon.rs:132`)~~. **Corrected (PSI production-wiring governance-repair pass, 2026-09-07):** the PSI half of this cell repeats the same false predicate corrected in §1's PSI row — `providers/psi.rs` is not a production `Event` producer, because nothing in `guardian-daemon` instantiates it. The real production `Event` producers today are the daemon monitoring tick and (since Gate 2b) the provider-health snapshot-diff producer | No (memory only, via recorder) | No (no `Events1` interface exists or is proposed) | Yes — `normalized_key`, `source_provider` already present. **Corrected (repair pass):** `timestamp_monotonic` is *not* cross-producer comparable (PSI's is a sequence counter, the daemon tick's is wall-clock seconds) — correlation uses the new ingress order (§6), and `timestamp_monotonic` is provenance-only | Needs a consumer that groups them, ordered by ingress, not by `timestamp_monotonic` |
 | `Incident` | Yes (G3, type only) | **No** — grep of every non-test/non-fixture call site in the workspace found zero production construction | No | Yes, wire shape only (`Incidents1.ListIncidents()` always empty) | N/A until produced | The producer itself — this phase's core deliverable |
 | Correlation chain | No | No | No | No | N/A | Net-new; no prior gate attempted this |
-| PSI telemetry/events | Yes (G5 model, G8 wiring) | Yes — real `/proc/pressure` via `poll()` | No | Via `Capabilities1.PsiSummary()` (snapshot only, not event history) | Yes | Needs correlation, not re-implementation |
+| PSI telemetry/events | Yes (G5 model; G8 *library* wiring). **Corrected (PSI production-wiring governance-repair pass, 2026-09-07):** "G8 wiring" means a complete library capability, not a production instantiation | ~~Yes — real `/proc/pressure` via `poll()`~~ → **No.** **Corrected (same pass):** there is **no production caller** — `guardian-daemon`'s `main()` instantiates only `monitoring_tick` and `capability_registry_tick`; `PsiEventSource`'s only construction site workspace-wide is the standalone `g8_psi_trigger_evidence` example binary, which no systemd unit runs | No | Via `Capabilities1.PsiSummary()` (snapshot only, not event history) | Yes | ~~Needs correlation, not re-implementation~~. **Corrected (same pass):** needs a **live production producer** (not re-implementation of the library — the library is correct and stays unmodified in its classification logic) *and* correlation. **In scope for this phase, NOT deferred** (TDD contract §51, "PSI production wiring, corrected"); owned by `P2-EVT-005..008`/`P2-VM-003` |
 | Provider health/state (`CapabilityRecord`) | Yes (G3/G8) | Yes — `capability_registry_tick` for six providers | No (recomputed each tick) | Yes — `Capabilities1.ListCapabilities()` | Yes, but only as a snapshot; transitions must be derived by diffing successive ticks | **Corrected (repair pass):** no `Event` of any kind is produced for provider-health today (verified: `capability_registry_tick` returns `Vec<CapabilityRecord>` snapshots only, nothing else) — the gap is producing a transition `Event` from a snapshot diff, not merely "transition-detection logic" atop an event stream that does not exist |
 | systemd read provider | Yes (G8, `providers/systemd.rs`) | Yes | No | Via `Capabilities1` | Yes | **REQUIRED FOUNDATION** (generic Availability/Health-transition correlation via the Capability Registry, §4.2/Gate 2b) — no systemd-specific event semantics beyond that are in scope this phase |
 | logind | Yes (G8, `providers/logind.rs`) | Yes — `list_blockers()` on `Capabilities1` | No | Yes | Yes (inhibitor changes) | **REQUIRED FOUNDATION**: generic Availability/Health-transition correlation (same as systemd, above). **OPTIONAL FUTURE ENRICHMENT, not part of this Phase 2 gate sequence**: session/inhibitor-lifecycle-specific event semantics (e.g. a distinct incident shape for "inhibitor added" vs. "inhibitor removed" rather than a generic health transition) |
@@ -979,12 +979,70 @@ groups) to `resource_refs.first()` (the actual stable PSI resource
 identity) — see §4.1's corrected text. `P2-COR-001`/`P2-COR-002` below
 are reworded to name the corrected key explicitly; no other row changes.
 
+**Fourth revision note (PSI production-wiring governance-repair pass,
+2026-09-07).** Five IDs are **new**: `P2-EVT-005`, `P2-EVT-006`,
+`P2-EVT-007`, `P2-EVT-008`, and `P2-VM-003`. They close a genuine
+**ownership gap**, not a defect in an existing ID: §51's decision item 3
+carried a false factual predicate ("PSI events already produced by G8's
+`providers::psi` wiring") of exactly the same shape as the provider-health
+predicate the 2026-09-05 repair pass corrected, and because of it **no
+`P2-*` ID and no gate manifest ever owned building a live PSI production
+event path**. §51's "PSI production wiring, corrected" text mints these
+IDs; this table records them. Each takes the next unused number in an
+**existing** family, per this section's own rule — no new family (§51's
+Consequences already establishes PSI does not mint one) and no suffix
+letters. No existing ID's number is reused and no existing ID's normative
+substance changes: `P2-EVT-001..004`, `P2-COR-*`, `P2-INC-002..004`,
+`P2-REC-*`, `P2-API-001..003`, and `P2-VM-001..002` are carried forward
+unchanged. In particular `P2-API-002` is untouched — the selected
+architecture (ADR-009, revised: in-daemon PSI production via
+systemd-inherited `OpenFile=` descriptors) adds no D-Bus method,
+interface, object path, or bus name, so no exception is requested or
+implied. **Minting a normative ID is a governance act and the project
+owner should confirm it explicitly**; prior Phase 2 repair passes minted
+none, but each of those reopened already-owned work, whereas this is
+genuinely unowned scope.
+
+**Fifth revision note (owner governance act, dated 2026-09-08).** The
+fourth revision note above recorded a *pending* confirmation request;
+that text is left unrewritten, per this project's own supersede-don't-
+erase discipline. The project owner has now read two independent
+whole-repair audits (both `PASS WITH NON-BLOCKING FINDINGS`), adjudicated
+five acceptance blockers, and explicitly confirms the mint, with one
+adjustment: `P2-EVT-005`, `P2-EVT-007`, `P2-EVT-008`, and `P2-VM-003` are
+**ACCEPTED** exactly as minted. `P2-EVT-006` is **DEMOTED** — it is no
+longer a standalone normative ID. Its full requirement text is preserved
+verbatim in the table below (struck through, not deleted) and now binds
+as **acceptance criteria** under `P2-EVT-005`/`P2-EVT-007`/`P2-EVT-008`,
+the IDs its descriptor-acquisition content was always in service of:
+without a correctly-resolved inherited descriptor there is no production
+instantiation (`P2-EVT-005`) and no daemon-owned classification
+(`P2-EVT-007`/`P2-EVT-008`) to evidence in the first place. This is a
+governance-status change only — none of `P2-EVT-006`'s requirement
+substance (`OpenFile=`/`LISTEN_FDNAMES` name resolution never positional,
+the `:graceful` partial-set case, the never-add-`FileDescriptorStoreMax`
+rule, `EBUSY` as a hard, observable, never-swallowed error) is weakened,
+loosened, or dropped; the same content is also carried, identically, in
+the gate TDD (`docs/guardian/30_TDD/gates/
+phase2-psi-inherited-descriptor-ingress-tdd.md`) and in ADR-009. No
+existing ID's number is reused, no requirement text is deleted, and no
+already-accepted gate (2a/2b/2c) is reopened by this act. `P2-VM-003`'s
+acceptance is additionally subject to a same-dated repair (Blocker 5)
+requiring direct observation of the live PSI `Event`'s fields, superseding
+the logs-plus-correlation-outcome methodology this ID's evidence
+originally relied on (`docs/evidence/p2/
+PHASE2_PSI_INHERITED_DESCRIPTOR_INGRESS_EVIDENCE.md` §F.14 item 2).
+
 | ID | Requirement |
 |---|---|
 | P2-EVT-001 | Correlation engine consumes events in **ingress order** (`CorrelationIngress`'s `ingress_clock`/`ingress_sequence`, §6), never insertion order and never a producer's own `timestamp_monotonic`, regardless of arrival order |
 | P2-EVT-002 | A duplicate `EventId` presented to the same open incident never appears twice in `event_ids` |
 | P2-EVT-003 *(new)* | Two events admitted from different fake producers with wildly different or backwards raw `timestamp_monotonic` values group according to ingress admission order, not raw timestamps |
 | P2-EVT-004 *(new)* | `CorrelationIngress`'s `ingress_clock`/`ingress_sequence` reset to a fresh epoch (sequence 0) on every `guardian-daemon` restart; no ordering guarantee is claimed or tested across a restart boundary |
+| P2-EVT-005 *(new, PSI production-wiring governance-repair pass; OWNER-CONFIRMED ACCEPTED 2026-09-08, §19 fifth revision note)* | Production `guardian-daemon` **instantiates** a live PSI event path in `main()` and admits real, kernel-triggered PSI `Event`s through the **existing** shared `admit_event`/`CorrelationIngress` admission point — never a second admission point. Acceptance evidence must exercise the **production instantiation**, not merely the library capability in isolation: the original defect was precisely that a complete, correct, tested library was never instantiated in production |
+| P2-EVT-006 *(new, PSI production-wiring governance-repair pass; DEMOTED 2026-09-08 by owner confirmation — see §19 fifth revision note)* | ~~PSI descriptors are inherited from systemd (`OpenFile=`, `systemd.service(5)`) and resolved by `LISTEN_FDNAMES` **name**, never by fixed index (the `:graceful` option reorders the list), and only after validating `LISTEN_PID` against the daemon's own PID. Each daemon restart obtains a **fresh open file description** (PSI triggers are per-description, not per-inode). A descriptor that is absent, unusable, or already-triggered (`EBUSY` at registration) is a hard, observable error for that resource — never a silent success and never a benign retry~~ — preserved verbatim, not deleted; now binds as **acceptance criteria** under `P2-EVT-005`/`P2-EVT-007`/`P2-EVT-008` (the IDs it factually supports — descriptor acquisition exists to make production instantiation and daemon-owned classification possible), not as a standalone ID |
+| P2-EVT-007 *(new, PSI production-wiring governance-repair pass; OWNER-CONFIRMED ACCEPTED 2026-09-08, §19 fifth revision note)* | `guardian-daemon` owns PSI event authority in full: `EventId`, ingress timestamp/order, severity/classification, resource identity, Guardian `Event` construction, and incident semantics. The `severity` value reaching `CorrelationEngine::classify()` is derived by the daemon from raw PSI text the daemon itself read through its own descriptor; **no component outside `guardian-daemon` supplies, influences, or self-reports a severity**. `resource_refs` remains `["/proc/pressure/{resource}"]`, preserving §4.1's corrected correlation identity |
+| P2-EVT-008 *(new, PSI production-wiring governance-repair pass; OWNER-CONFIRMED ACCEPTED 2026-09-08, §19 fifth revision note)* | Missing, malformed, non-finite, or out-of-range raw PSI input never crosses an internal boundary as a valid measurement and is never converted into "no pressure": an absent or unreadable PSI source yields a truthful `PsiReading::Unavailable` (`P1-PSI-005`, existing accepted behavior), and a PSI failure degrades **PSI observability only** — provider-health correlation, the monitoring-tick recorder, `Capabilities1`, and `Incidents1` are provably unaffected |
 | P2-COR-001 *(key reworded, Gate 2a implementation-repair pass)* | A PSI `Critical` event for a previously-nominal `(provider, resource_refs.first())` key opens a new incident when none is open for that key — keyed by stable resource identity, never transition-text-bearing `normalized_key` (§4.1) |
 | P2-COR-002 *(key reworded, Gate 2a implementation-repair pass)* | A second PSI `Critical` event for the same `(provider, resource_refs.first())` key within the debounce window (measured in ingress order) links to the existing open incident, not a new one, even when its transition-description text differs from the first event's |
 | P2-COR-003 | A debounced `Available→Unavailable` transition for a `capability_id` opens or updates exactly one incident for that `capability_id` |
@@ -1006,6 +1064,7 @@ are reworded to name the corrected key explicitly; no other row changes.
 | P2-API-003 *(new, second repair pass)* | A regression test locks `IncidentWire`'s exact current shape — a 7-field positional tuple of `String`s — so that any future accidental change to its arity, field order, or field type fails a test immediately rather than silently drifting; this is a regression guard for Phase 2, not a new capability |
 | P2-VM-001 | Real disposable-VM stop/start of an already-evidenced unit (e.g. `cups.service`) produces a real, observable `Incidents1` transition over the real system bus |
 | P2-VM-002 | A real `guardian-daemon` restart during an open incident loses that incident, per §9's accepted semantics (including a fresh ingress epoch), confirmed by fresh VM evidence, not asserted from source reading alone |
+| P2-VM-003 *(new, PSI production-wiring governance-repair pass; OWNER-CONFIRMED ACCEPTED 2026-09-08, §19 fifth revision note, subject to Blocker 5's direct-Event-evidence repair)* | Real disposable-VM evidence, produced from the **real production systemd unit** (never a manual `cargo run`), that the complete live PSI path executes with the accepted daemon sandbox **still active and unchanged** — systemd supplies the expected descriptors, real kernel trigger registration succeeds, `poll(POLLPRI)` wakes on a real crossing, the daemon constructs a PSI Guardian `Event`, it reaches the shared Phase 2 ingress, correlation executes, `/proc/pressure` remains unavailable to the daemon **by pathname**, unrelated procfs remains hidden exactly as before, the daemon remains unprivileged with no new capabilities, restart obtains fresh descriptors, PSI failure degrades PSI observability only, and the provider-health/UPower path remains functional. Raw evidence must be sufficient for independent reproduction |
 
 ---
 

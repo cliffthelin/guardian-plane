@@ -2586,7 +2586,31 @@ TDD-contract Phase 2, as scoped by this planning pass, is exactly:
    no `Event` of any kind is emitted for a Health/Availability change.
    This phase's scope therefore includes producing a provider-health
    transition `Event` from successive snapshot diffs, not merely
-   detecting one that already exists.
+   detecting one that already exists. **Second correction (PSI production
+   wiring, governance-repair pass, 2026-09-07, see revision history):**
+   the parenthetical "(already produced by G8's `providers::psi` wiring)"
+   above is **factually false and is hereby corrected**, exactly the way
+   the provider-health predicate immediately above it was corrected — it
+   is the structurally identical defect, left uncorrected when the
+   provider-health one was fixed. G8 produced a complete PSI *library*
+   capability (`crates/guardian-core/src/providers/psi.rs`'s
+   `PsiFileSource`/`PsiTrigger`/`PsiEventSource`), but production
+   `guardian-daemon` **never instantiates it**: `main()` calls only
+   `monitoring_tick` and `capability_registry_tick`, and the sole
+   construction site of `PsiEventSource` anywhere in the workspace is a
+   standalone example binary (`crates/guardian-core/examples/
+   g8_psi_trigger_evidence.rs`), which is not part of any
+   systemd-managed production process. No live PSI `Event` has ever
+   reached the shared production correlation ingress. **This phase's
+   scope therefore includes producing live PSI `Event`s in
+   `guardian-daemon` and admitting them through the same
+   `CorrelationIngress` admission point every other producer uses — it is
+   corrected in scope, NOT deferred.** PSI is absent from every deferral
+   list in this section's own "explicitly excludes" text, and narrowing
+   the requirement to a deferral to match what was implemented would be
+   changing the contract to fit the implementation after the fact. See
+   "PSI production wiring, corrected" below for the binding text and the
+   normative IDs this correction mints.
 4. Bounded, in-memory-only retention for both the correlation engine's
    working state and any incident history it produces in this phase
    (§7/§8 of the implementation handoff), subordinate to G5's Diagnostic
@@ -2820,6 +2844,132 @@ semantics — only the Phase 2 correlation-rule text that referenced it
 incorrectly. See the implementation handoff §4.1 for the full corrected
 text.
 
+**PSI production wiring, corrected (governance-repair pass,
+2026-09-07).** Decision item 3 above asserted PSI events were "already
+produced by G8's `providers::psi` wiring." That predicate is false, and
+is corrected here the same way — and for the same reason — this section
+already corrected the structurally identical provider-health predicate in
+its 2026-09-05 repair pass. The defect is symmetric: in both cases a
+planning pass mistook a complete, tested *library* capability for a
+*production instantiation*, and in both cases the correct repair is to
+state honestly that this phase's scope includes standing the producer up.
+
+**Binding corrections.**
+
+- **The factual predicate is withdrawn.** `guardian-daemon` does not, and
+  never did, instantiate `guardian_core::providers::psi::PsiEventSource`.
+  Verified directly against production source, not paraphrased:
+  `main()` (`crates/guardian-daemon/src/bin/guardian-daemon.rs`) wires
+  exactly two event producers to `admit_event` — `monitoring_tick` and
+  `capability_registry_tick` — and neither references PSI in any form. The
+  binary's own module doc comment states the gap honestly and is not the
+  source of the error; the planning text was.
+- **The scope inclusion is unchanged and is NOT narrowed.** PSI-event
+  correlation remains affirmatively in scope for TDD-contract Phase 2. The
+  inclusion clause in Decision item 3 never depended on the false
+  predicate — it is freestanding — and PSI appears in none of this
+  section's deferral lists. **Producing live PSI `Event`s in production is
+  therefore in scope for this phase**, exactly as producing
+  provider-health transition `Event`s was found to be in scope by the
+  earlier repair. This correction makes the contract honest about what is
+  required; it does not make the requirement smaller.
+- **Ownership, previously absent, is now assigned.** No `P2-*` ID and no
+  gate manifest (2a/2b/2c) ever assigned ownership of building a live PSI
+  production event path — the ownership gap that let this defect survive
+  three gates. This revision mints the normative IDs below to close it.
+  This is the same mechanism by which this section's prior repair passes
+  minted `P2-EVT-003`/`P2-EVT-004`, `P2-REC-003`/`P2-REC-004`/
+  `P2-REC-005`, and `P2-API-003`: a §51 revision approving new IDs, each
+  taking the next unused number in an **existing** family, never an
+  inserted suffix letter and never a new family (this section's own
+  Consequences text already establishes that PSI does not mint a separate
+  family).
+- **The architecture is decided and recorded**, satisfying this section's
+  own governance order: `docs/adr/ADR-009-guardian-psi-producer-topology.md`
+  (revised in place) selects **in-daemon PSI production via
+  systemd-inherited `OpenFile=` descriptors with daemon-owned
+  classification** — no new process, no new service UID, **no new D-Bus
+  interface**, no new IPC protocol, no producer-supplied severity, and no
+  weakening of `guardian-daemon`'s accepted `ProcSubset=pid` sandbox. The
+  Contract Collision this defect produced is recorded RESOLVED in
+  `docs/guardian/30_TDD/gates/phase2-psi-production-ingress-preflight.md`
+  §10, on the real VM evidence in its §9.
+- **`P2-API-002` is untouched by this correction.** The selected
+  architecture adds no D-Bus method, interface, object path, or bus name
+  of any kind, so no `P2-API-002` exception is requested, granted, or
+  implied by this revision. (An earlier, superseded architecture proposal
+  did raise a `P2-API-002` scope question, on which two independent
+  reviewers disagreed; that question is moot under the selected
+  architecture and is deliberately left unadjudicated — see ADR-009's
+  revision history. A future gate that genuinely proposes a new bus name
+  must resolve it then, on its own merits.)
+
+**Normative IDs minted by this revision** (each the next unused number in
+an existing family; full requirement text also carried in the
+implementation handoff's §19 inventory, and owned by the implementation
+gate `docs/guardian/30_TDD/gates/phase2-psi-inherited-descriptor-ingress-manifest.toml`):
+
+| ID | Requirement |
+|---|---|
+| `P2-EVT-005` *(new; OWNER-CONFIRMED ACCEPTED 2026-09-08 — see below)* | Production `guardian-daemon` instantiates a live PSI event path in `main()` and admits real, kernel-triggered PSI `Event`s through the **existing** shared `admit_event`/`CorrelationIngress` admission point — never a second admission point. Proven by evidence exercising the **production instantiation**, not merely the library capability in isolation |
+| `P2-EVT-006` *(new; DEMOTED 2026-09-08 by owner confirmation — no longer a standalone normative ID; see below)* | ~~PSI descriptors are inherited from systemd (`OpenFile=`) and resolved by `LISTEN_FDNAMES` **name**, never by fixed index, only after validating `LISTEN_PID` against the daemon's own PID; each restart obtains a fresh open file description, and a descriptor that is absent, unusable, or already-triggered (`EBUSY`) is a hard, observable error for that resource, never a silent success~~ — this requirement text is **preserved verbatim, not deleted**, and now binds as **acceptance criteria** under `P2-EVT-005`/`P2-EVT-007`/`P2-EVT-008` (whichever it factually supports at the point of evidence), per the 2026-09-08 owner governance act below |
+| `P2-EVT-007` *(new; OWNER-CONFIRMED ACCEPTED 2026-09-08 — see below)* | `guardian-daemon` owns PSI event authority in full: `EventId`, ingress timestamp/order, severity/classification, resource identity, Guardian `Event` construction, and incident semantics. Severity reaching `CorrelationEngine::classify()` is derived by the daemon from raw PSI text the daemon itself read; no component outside `guardian-daemon` supplies, influences, or self-reports a severity |
+| `P2-EVT-008` *(new; OWNER-CONFIRMED ACCEPTED 2026-09-08 — see below)* | Missing, malformed, non-finite, or out-of-range raw PSI input never crosses an internal boundary as a valid measurement and never becomes "no pressure": an absent or unreadable PSI source yields a truthful `PsiReading::Unavailable` (`P1-PSI-005`), and a PSI failure degrades PSI observability only — provider-health correlation, the monitoring-tick recorder, and the existing D-Bus surfaces are provably unaffected |
+| `P2-VM-003` *(new; OWNER-CONFIRMED ACCEPTED 2026-09-08 — see below)* | Real disposable-VM evidence, produced from the real production systemd unit (never a manual `cargo run`), that the complete path executes with the accepted daemon sandbox still active and unchanged — including that `/proc/pressure` remains unavailable to the daemon **by pathname** and that unrelated procfs remains hidden exactly as before |
+
+No existing ID's number is reused for a different requirement, and no
+existing ID's normative substance is changed by this revision.
+`P2-EVT-001..004`, `P2-COR-*`, `P2-INC-002..004`, `P2-REC-*`, `P2-API-*`,
+and `P2-VM-001..002` are carried forward unchanged.
+
+**Owner-confirmation flag.** Minting a normative ID is a governance act.
+Prior Phase 2 repair passes deliberately avoided minting new IDs, but each
+of those was a *reopening* of already-owned work; this is genuinely
+**unowned** scope, which is the case §19's own rule ("any future addition
+gets the next unused number in its family") is written for. The project
+owner should confirm this minting explicitly before the implementation
+gate is executed.
+
+**Owner confirmation, resolved (dated governance act, 2026-09-08).** The
+flag immediately above recorded a *pending* confirmation; that pending
+language is left exactly as written, per this project's own
+supersede-don't-erase rule — it is not rewritten, only superseded by this
+dated act. Having read the two independent whole-repair audits of the
+PSI production-ingress candidate (both `PASS WITH NON-BLOCKING FINDINGS`
+on architecture/sandbox/EWMA-regression/threshold-fix/`P2-COR-002`
+reproduction) and adjudicated five specific acceptance blockers on top of
+that PASS, the project owner now explicitly confirms this minting, with
+one adjustment to the original five-ID mint:
+
+- **`P2-EVT-005` — ACCEPT** as minted.
+- **`P2-EVT-006` — DEMOTE to acceptance criteria, not a standalone
+  normative ID.** Its descriptor-acquisition requirements
+  (`OpenFile=` resolution, `LISTEN_FDNAMES` name-based resolution never
+  positional, the `:graceful` partial-set case, the never-add
+  `FileDescriptorStoreMax` rule, and `EBUSY` as a hard, observable,
+  never-swallowed error) remain **binding** — they are not weakened,
+  loosened, or dropped — but they now bind as acceptance criteria under
+  `P2-EVT-005`/`P2-EVT-007`/`P2-EVT-008` (the IDs they were always
+  factually in service of: descriptor acquisition exists to make
+  production instantiation, §-EVT-005, and daemon-owned classification,
+  §-EVT-007/008, possible in the first place) rather than as a
+  free-standing ID of its own. This is a governance-status change only;
+  the requirement text above is preserved verbatim (struck through, not
+  deleted) rather than silently rewritten, and the same content is
+  carried in the PSI repair TDD/ADR referenced from the implementation
+  handoff's §19 and the gate manifest's `owned_normative_ids`.
+- **`P2-EVT-007` — ACCEPT** as minted.
+- **`P2-EVT-008` — ACCEPT** as minted.
+- **`P2-VM-003` — ACCEPT** as minted, subject to this repair's own
+  Blocker 5 (direct live `Event` evidence, superseding the
+  logs-plus-correlation-outcome methodology `docs/evidence/p2/
+  PHASE2_PSI_INHERITED_DESCRIPTOR_INGRESS_EVIDENCE.md` §F.14 item 2
+  originally relied on).
+
+No existing ID's number is reused, no ID's requirement text is deleted,
+and this act does not reopen any already-accepted gate (Gate 2a/2b/2c).
+It resolves only the confirmation this section's own flag left pending.
+
 ## Disambiguation (restated, per §50's binding rule)
 
 This section adds no fourth meaning. "TDD-contract Phase 2" continues to
@@ -2850,7 +3000,14 @@ single, non-disjunctive rule (bounded/saturating counter + existing
 `eprintln!` log line, with an explicit, independently-testable
 `P2-REC-005` rule that it never re-enters `CorrelationIngress`), closing
 the recursive-overflow risk a comprehensive combined review identified
-in the first repair pass's wording.
+in the first repair pass's wording. Per the PSI production-wiring
+governance-repair pass (2026-09-07): decision item 3's second false
+predicate is corrected rather than narrowed — live PSI event production
+in `guardian-daemon` is in scope for this phase and was never actually
+provided by G8 — and the previously-unowned scope now has explicit
+ownership through five newly minted IDs (`P2-EVT-005`..`P2-EVT-008`,
+`P2-VM-003`), each taking the next unused number in an existing family.
+That pass adds no interface, no bus name, and no `P2-API-002` exception.
 
 ## Revision history
 
@@ -2969,6 +3126,72 @@ in the first repair pass's wording.
   text (here and in the implementation handoff) is corrected, the same
   "supersede, don't hide" way this section has been revised in place
   twice before.
+- 2026-09-07, PSI production-wiring governance-repair pass (this one):
+  this section's decision item 3 carried a **second** false factual
+  predicate of exactly the same shape as the one the 2026-09-05 repair
+  pass corrected for provider-health — "(already produced by G8's
+  `providers::psi` wiring)" — and that one was never corrected when its
+  twin was. Verified directly against production source, not paraphrase:
+  `guardian-daemon`'s `main()` wires exactly two producers to
+  `admit_event` (`monitoring_tick`, `capability_registry_tick`), neither
+  of which references PSI, and the only `PsiEventSource` construction site
+  anywhere in the workspace is a standalone example binary
+  (`crates/guardian-core/examples/g8_psi_trigger_evidence.rs`) that is not
+  part of any systemd-managed production process. **Corrected exactly the
+  way the provider-health predicate was corrected, and deliberately NOT
+  by declaring PSI deferred:** PSI-event correlation was, and remains,
+  affirmatively in scope (the inclusion clause never depended on the
+  predicate, and PSI appears in none of this section's deferral lists);
+  what this pass adds is the honest statement that producing live PSI
+  `Event`s in `guardian-daemon` is *this phase's* work and was not in fact
+  already provided. Narrowing the requirement to match what was
+  implemented would have been changing the contract to fit the
+  implementation after the fact, and is explicitly refused. Two further
+  items are recorded by this pass: (1) **ownership, previously absent, is
+  assigned** — no `P2-*` ID and no gate manifest ever owned a live PSI
+  production event path, the gap that let this defect survive three gates;
+  this revision mints `P2-EVT-005`, `P2-EVT-006`, `P2-EVT-007`,
+  `P2-EVT-008`, and `P2-VM-003` (each the next unused number in an
+  existing family, per §19's own rule, no new family and no suffix
+  letters), flagged for explicit project-owner confirmation because
+  minting a normative ID is a governance act and prior Phase 2 repairs
+  minted none — those were reopenings of already-owned work, whereas this
+  is genuinely unowned scope; (2) **the architecture is decided and
+  recorded** in `docs/adr/ADR-009-guardian-psi-producer-topology.md`
+  (revised in place, its original `guardian-psi`-process/D-Bus decision
+  and both independent architecture-review FAIL findings preserved as
+  labelled superseded history): in-daemon PSI production via
+  systemd-inherited `OpenFile=` descriptors with daemon-owned
+  classification — no new process, no new UID, **no new D-Bus interface**
+  (so `P2-API-002` needs no exception and none is requested), no new IPC
+  protocol, no producer-supplied severity, and no weakening of
+  `ProcSubset=pid`. The Contract Collision this defect produced is
+  recorded RESOLVED in `docs/guardian/30_TDD/gates/
+  phase2-psi-production-ingress-preflight.md` §10, on the real VM evidence
+  in its §9. No prior gate's acceptance, tag, or evidence is altered by
+  this pass; no production code, no `debian/*.service` file, and no Gate
+  2c file was changed by it; only this planning candidate's own text (here
+  and in the implementation handoff's §1/§3/§19) is corrected, the same
+  "supersede, don't hide" way this section has now been revised in place
+  four times before.
+- 2026-09-08, owner governance act (dated confirmation, this pass): the
+  project owner, having read two independent whole-repair audits of the
+  PSI production-ingress candidate (both `PASS WITH NON-BLOCKING
+  FINDINGS`) and adjudicated five acceptance blockers, explicitly
+  confirms the 2026-09-07 pass's pending mint, with one adjustment:
+  `P2-EVT-005`/`P2-EVT-007`/`P2-EVT-008`/`P2-VM-003` are **ACCEPTED** as
+  minted; `P2-EVT-006` is **DEMOTED** to acceptance criteria under those
+  three IDs rather than remaining a standalone ID — its requirement text
+  is preserved verbatim (struck through, not deleted) in the "Normative
+  IDs minted by this revision" table above, and carried forward as
+  binding acceptance criteria in the gate TDD
+  (`docs/guardian/30_TDD/gates/phase2-psi-inherited-descriptor-ingress-tdd.md`)
+  and ADR-009. The prior pass's "pending confirmation" language (the
+  "Owner-confirmation flag" paragraph above) is left unrewritten, per this
+  section's own "supersede, don't hide" discipline; this entry and the
+  "Owner confirmation, resolved" block above it are what resolve it. No
+  existing ID's number is reused, no requirement text is deleted, and no
+  already-accepted gate (2a/2b/2c) is reopened by this act.
 
 ## Rollback / migration implications
 

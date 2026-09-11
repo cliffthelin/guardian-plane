@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex};
 use guardian_core::correlation::CorrelationEngine;
 use guardian_core::incident::{Confidence, Incident, IncidentStatus};
 use guardian_core::providers::logind::LogindProvider;
-use guardian_core::providers::psi::PsiFileSource;
+use guardian_core::providers::psi::{PsiAvailability, PsiFileSource, PsiResourceStatus};
 use guardian_core::psi::{PsiReading, PsiResourceKind};
 use guardian_provider_api::{
     Availability, CapabilityRecord, Health, InterfaceKind, Knowledge, PrivilegeRequirement,
@@ -138,41 +138,113 @@ pub fn to_capability_wire(record: &CapabilityRecord) -> CapabilityWire {
     )
 }
 
+/// **Final acceptance repair (post-`Phase H`, this pass).** An independent
+/// re-review reproduced, live, on one running daemon:
+/// `Capabilities1.ListCapabilities: psi.pressure.cpu = "available"/
+/// "healthy"` simultaneously with `Capabilities1.PsiSummary: cpu ...
+/// supported=false`. The root cause: `psi_summary` (below) called the
+/// real, standard-kernel-path [`PsiFileSource`] constructor — a
+/// `/proc/pressure` **pathname** read — unconditionally, exactly the
+/// defect Blocker 4 (`H.5` in the evidence
+/// document) had already fixed for `ListCapabilities`'s own
+/// `registry::psi_capabilities`, but that fix was never threaded into
+/// this type. Under the accepted `ProcSubset=pid` sandbox a pathname read
+/// **always** fails, so `psi_summary` unconditionally reported
+/// `supported=false` for every resource regardless of how the live
+/// inherited-descriptor monitor was actually doing — a structural, not
+/// incidental, contradiction.
+///
+/// The fix: `Capabilities1` now holds the **same two governed,
+/// already-shared production sources** `main()` wires into
+/// `capability_registry_tick`/`registry::psi_capabilities` — the
+/// `Arc<Mutex<PsiAvailability>>` `spawn_psi_ingress` returns, and a
+/// [`PsiFileSource`] built from the **same** inherited `/proc/self/fd/N`
+/// descriptors `psi_ingress`'s own per-resource monitors read through
+/// (`psi_availability`/`psi_source` below). `psi_summary` never opens
+/// `/proc/pressure` by pathname again, and can therefore never disagree
+/// with `list_capabilities` about *whether* a resource is supported — see
+/// [`real_psi_summary`].
 pub struct Capabilities1 {
     snapshot: Arc<Mutex<Vec<CapabilityRecord>>>,
+    psi_availability: Arc<Mutex<PsiAvailability>>,
+    psi_source: PsiFileSource,
 }
 
 impl Capabilities1 {
     #[must_use]
-    pub const fn new(snapshot: Arc<Mutex<Vec<CapabilityRecord>>>) -> Self {
-        Self { snapshot }
+    pub const fn new(
+        snapshot: Arc<Mutex<Vec<CapabilityRecord>>>,
+        psi_availability: Arc<Mutex<PsiAvailability>>,
+        psi_source: PsiFileSource,
+    ) -> Self {
+        Self {
+            snapshot,
+            psi_availability,
+            psi_source,
+        }
     }
 }
 
-/// `(kind, avg10, avg60, avg300, available)` — real, live
-/// `/proc/pressure/{cpu,memory,io}` reads via G8's unmodified
-/// `PsiFileSource`/G5 model, not a proxy through the Capability
-/// Registry's own (coarser, availability-only) PSI records.
+/// `(kind, avg10, avg60, avg300, available)` — the wire shape is
+/// unchanged from G9/Gate 2b (`P2-API-002` is not engaged; no field is
+/// added, removed, or retyped). What changed in this pass is only where
+/// the values come from: the **same** governed inherited-descriptor PSI
+/// state `registry::psi_capabilities` reads for `ListCapabilities`, never
+/// an independent `/proc/pressure` pathname re-probe.
 pub type PsiSummaryWire = (String, f64, f64, f64, bool);
 
+/// Pure, Layer-1-testable projection — no D-Bus involved. Builds
+/// `PsiSummary`'s wire rows from the single shared, governed PSI state:
+///
+/// - `availability` is the **same** [`PsiAvailability`] snapshot
+///   `registry::psi_capabilities` classifies for `ListCapabilities`, so
+///   the two D-Bus methods read one authoritative source and can never
+///   structurally disagree about whether a resource is supported.
+/// - `source` is a [`PsiFileSource`] built over the **same** inherited
+///   `/proc/self/fd/N` descriptors `psi_ingress`'s own per-resource
+///   monitors already hold open — never a fresh `/proc/pressure`
+///   pathname `open()`, which `ProcSubset=pid` denies unconditionally
+///   from inside the daemon.
+///
+/// A resource is reported `available=true` with real numbers only when
+/// **both** the governed state says [`PsiResourceStatus::Available`]
+/// **and** a live read through that same descriptor actually succeeds
+/// this call — never a fabricated number, and never `available=true`
+/// with no real observation behind it (a resource whose state transitions
+/// away from `Available` in the narrow window between the two checks
+/// degrades to the truthful `(0.0, 0.0, 0.0, false)` row this wire shape
+/// already used for "no measurement," rather than serving stale numbers).
+/// `Degraded`, `NoDescriptor`, and "never observed" (`None`) all collapse
+/// to that same truthful row: this wire has no separate slot for *why* a
+/// resource is unavailable, only *whether* a real measurement exists —
+/// `ListCapabilities` is the surface that reports the distinguishing
+/// reason.
 #[must_use]
-pub fn real_psi_summary() -> Vec<PsiSummaryWire> {
-    let source = PsiFileSource::real();
+pub fn real_psi_summary(
+    availability: &PsiAvailability,
+    source: &PsiFileSource,
+) -> Vec<PsiSummaryWire> {
     [
         (PsiResourceKind::Cpu, "cpu"),
         (PsiResourceKind::Memory, "memory"),
         (PsiResourceKind::Io, "io"),
     ]
     .into_iter()
-    .map(|(kind, name)| match source.read(kind) {
-        Ok(PsiReading::Present(resource)) => (
-            name.to_owned(),
-            resource.some.avg10,
-            resource.some.avg60,
-            resource.some.avg300,
-            true,
-        ),
-        _ => (name.to_owned(), 0.0, 0.0, 0.0, false),
+    .map(|(kind, name)| {
+        let governed_available =
+            matches!(availability.get(kind), Some(PsiResourceStatus::Available));
+        if governed_available {
+            if let Ok(PsiReading::Present(resource)) = source.read(kind) {
+                return (
+                    name.to_owned(),
+                    resource.some.avg10,
+                    resource.some.avg60,
+                    resource.some.avg300,
+                    true,
+                );
+            }
+        }
+        (name.to_owned(), 0.0, 0.0, 0.0, false)
     })
     .collect()
 }
@@ -190,10 +262,13 @@ impl Capabilities1 {
             .collect()
     }
 
-    /// Real, live `/proc/pressure` reads — see [`real_psi_summary`].
-    #[allow(clippy::unused_self)] // required receiver for a zbus::interface method
+    /// Real, live PSI reads through the same governed, shared
+    /// inherited-descriptor state `list_capabilities` reads — see
+    /// [`real_psi_summary`] and this type's own doc comment for why this
+    /// can no longer contradict `list_capabilities`.
     fn psi_summary(&self) -> Vec<PsiSummaryWire> {
-        real_psi_summary()
+        let availability = self.psi_availability.lock().unwrap().clone();
+        real_psi_summary(&availability, &self.psi_source)
     }
 
     /// Real, live `org.freedesktop.login1.ListInhibitors` read (contract
@@ -605,12 +680,186 @@ mod tests {
         let _ = transactions;
     }
 
+    /// Test-only helper: a [`PsiFileSource`] over a temp directory with
+    /// real, parseable pressure text written for `kind` — never
+    /// `/proc/pressure`, matching every other test in this module's
+    /// "never touch the real kernel" discipline.
+    fn file_source_with(
+        entries: &[(PsiResourceKind, &str)],
+    ) -> (tempfile_dir::TempDir, PsiFileSource) {
+        let dir = tempfile_dir::TempDir::new();
+        for (kind, text) in entries {
+            let name = match kind {
+                PsiResourceKind::Cpu => "cpu",
+                PsiResourceKind::Memory => "memory",
+                PsiResourceKind::Io => "io",
+            };
+            std::fs::write(dir.path().join(name), text).unwrap();
+        }
+        let source = PsiFileSource::at(dir.path());
+        (dir, source)
+    }
+
+    /// Minimal, dependency-free temp-directory helper (this workspace has
+    /// no `tempfile` crate dependency in `guardian-daemon`) — a
+    /// process-unique directory under `std::env::temp_dir()`, removed on
+    /// drop.
+    mod tempfile_dir {
+        use std::path::{Path, PathBuf};
+
+        pub struct TempDir(PathBuf);
+
+        impl TempDir {
+            pub fn new() -> Self {
+                let dir = std::env::temp_dir().join(format!(
+                    "guardian-dbus-surface-psi-test-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                std::fs::create_dir_all(&dir).unwrap();
+                Self(dir)
+            }
+
+            pub fn path(&self) -> &Path {
+                &self.0
+            }
+        }
+
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+    }
+
+    const SAMPLE_CPU_LINE: &str = "some avg10=12.34 avg60=5.60 avg300=1.20 total=100\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
+
     #[test]
-    fn psi_summary_reports_three_real_kernel_resources() {
-        let summary = real_psi_summary();
+    fn psi_summary_reports_three_resources_by_name() {
+        let (_dir, source) = file_source_with(&[]);
+        let summary = real_psi_summary(&PsiAvailability::default(), &source);
         assert_eq!(summary.len(), 3);
         let names: Vec<&str> = summary.iter().map(|(name, ..)| name.as_str()).collect();
         assert_eq!(names, ["cpu", "memory", "io"]);
+    }
+
+    /// The exact regression this pass closes: a live inherited CPU PSI
+    /// descriptor (governed state `Available`) must produce a real,
+    /// non-fabricated measurement with `available=true` — never the
+    /// `supported=false` the pathname-probe defect always produced.
+    #[test]
+    fn psi_summary_reports_real_numbers_when_governed_state_says_available() {
+        let (_dir, source) = file_source_with(&[(PsiResourceKind::Cpu, SAMPLE_CPU_LINE)]);
+        let mut state = PsiAvailability::default();
+        state.set(PsiResourceKind::Cpu, PsiResourceStatus::Available);
+        let summary = real_psi_summary(&state, &source);
+        let cpu = summary
+            .iter()
+            .find(|(name, ..)| name == "cpu")
+            .expect("cpu row must exist");
+        assert_eq!(cpu, &("cpu".to_owned(), 12.34, 5.60, 1.20, true));
+    }
+
+    /// Structural non-contradiction, the exact property the failing
+    /// re-review demanded: for the SAME [`PsiAvailability`] snapshot,
+    /// whatever `registry::psi_capabilities` reports as
+    /// `Availability::Available` (never `Unsupported`) for a resource,
+    /// `real_psi_summary` must report that resource `available=true` —
+    /// on one shared input, not by narrative agreement between two
+    /// independently-probing code paths.
+    #[test]
+    fn psi_summary_and_list_capabilities_never_disagree_on_the_same_governed_state() {
+        use guardian_core::providers::registry::psi_capabilities;
+        use guardian_provider_api::Availability;
+
+        let (_dir, source) = file_source_with(&[
+            (PsiResourceKind::Cpu, SAMPLE_CPU_LINE),
+            (PsiResourceKind::Io, SAMPLE_CPU_LINE),
+        ]);
+        let mut state = PsiAvailability::default();
+        state.set(PsiResourceKind::Cpu, PsiResourceStatus::Available);
+        state.set(
+            PsiResourceKind::Memory,
+            PsiResourceStatus::Degraded("EBUSY".to_owned()),
+        );
+        state.set(PsiResourceKind::Io, PsiResourceStatus::Available);
+
+        let capability_records = psi_capabilities(Some(&state));
+        let summary = real_psi_summary(&state, &source);
+
+        for (cap_id, name) in [
+            ("psi.pressure.cpu", "cpu"),
+            ("psi.pressure.memory", "memory"),
+            ("psi.pressure.io", "io"),
+        ] {
+            let capability_available = capability_records
+                .iter()
+                .find(|r| r.capability_id.as_str() == cap_id)
+                .map(|r| r.availability == Availability::Available)
+                .unwrap();
+            let summary_available = summary
+                .iter()
+                .find(|(row_name, ..)| row_name == name)
+                .map(|(_, _, _, _, available)| *available)
+                .unwrap();
+            assert_eq!(
+                capability_available, summary_available,
+                "{name}: ListCapabilities availability=={capability_available} but \
+                 PsiSummary available=={summary_available} — the exact contradiction \
+                 the acceptance re-review reproduced live"
+            );
+        }
+    }
+
+    /// A missing (`:graceful`-dropped) descriptor never fabricates a
+    /// measurement, even if a stray file happens to exist at the source
+    /// path — the governed state, not file presence, gates `available`.
+    #[test]
+    fn psi_summary_never_reports_available_for_a_resource_with_no_governed_descriptor() {
+        let (_dir, source) = file_source_with(&[(PsiResourceKind::Memory, SAMPLE_CPU_LINE)]);
+        let mut state = PsiAvailability::default();
+        state.set(PsiResourceKind::Memory, PsiResourceStatus::NoDescriptor);
+        let summary = real_psi_summary(&state, &source);
+        let memory = summary
+            .iter()
+            .find(|(name, ..)| name == "memory")
+            .expect("memory row must exist");
+        assert_eq!(memory, &("memory".to_owned(), 0.0, 0.0, 0.0, false));
+    }
+
+    /// A resource the governed state has never observed at all (`None`,
+    /// the pre-startup / zero-descriptor case) is the same truthful
+    /// unavailable row, never a panic and never a fabricated `true`.
+    #[test]
+    fn psi_summary_is_truthfully_unavailable_when_never_observed() {
+        let (_dir, source) = file_source_with(&[]);
+        let summary = real_psi_summary(&PsiAvailability::default(), &source);
+        for row in &summary {
+            assert!(!row.4, "{row:?}: never-observed must be unavailable");
+        }
+    }
+
+    /// Partial availability (cpu up, memory degraded, io absent) is
+    /// represented individually and correctly, mirroring
+    /// `registry::psi_capabilities`'s own partial-availability test.
+    #[test]
+    fn psi_summary_represents_partial_availability_individually() {
+        let (_dir, source) = file_source_with(&[(PsiResourceKind::Cpu, SAMPLE_CPU_LINE)]);
+        let mut state = PsiAvailability::default();
+        state.set(PsiResourceKind::Cpu, PsiResourceStatus::Available);
+        state.set(
+            PsiResourceKind::Memory,
+            PsiResourceStatus::Degraded("EBUSY".to_owned()),
+        );
+        state.set(PsiResourceKind::Io, PsiResourceStatus::NoDescriptor);
+        let summary = real_psi_summary(&state, &source);
+        let get = |name: &str| summary.iter().find(|(n, ..)| n == name).unwrap().4;
+        assert!(get("cpu"));
+        assert!(!get("memory"));
+        assert!(!get("io"));
     }
 
     #[test]
