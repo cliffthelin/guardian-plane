@@ -47,6 +47,20 @@ When instructions appear to conflict, use this order:
 
 If an external provider contract appears to contradict Guardian documentation, do not silently choose one. Record the discrepancy as a contract/source-drift issue.
 
+### Phase Execution Specs and Phase TDDs
+
+Phase Execution Specs and Phase TDDs are living planning and coordination
+documents governed by
+`docs/guardian/30_TDD/GUARDIAN_PHASE_SPEC_DOCTRINE.md`. They are subordinate
+to `docs/guardian/00_Project/GUARDIAN_MASTER_SPEC.md` for the product
+destination and do not become normative merely because they live under
+`30_TDD/`.
+
+They may revise the current execution route, but may not silently revise a
+Master-Spec outcome. Existing normative contracts, accepted gate manifests and
+TDDs, ADRs, and the source-of-governance order above retain their established
+authority.
+
 ## Required lookup workflow
 
 Before implementing behavior that depends on Ubuntu, systemd, D-Bus, polkit, UDisks, AccountsService, PSI, NetworkManager, or another external provider:

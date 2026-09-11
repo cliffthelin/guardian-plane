@@ -26,6 +26,10 @@ gates/*-tdd.md`); optional/non-blocking concern →
 `GUARDIAN_HARDENING_BACKLOG.md`; today's requested work → the task
 prompt itself. Nothing normative lives in more than one of these places.
 
+Phase Execution Specs and Phase TDDs are living planning and coordination
+documents governed by `GUARDIAN_PHASE_SPEC_DOCTRINE.md`. They do not become a
+new normative home or change the placement rule above.
+
 ## Procedure
 
 1. **Load the assigned gate manifest and TDD.** Read exactly one
@@ -40,7 +44,9 @@ prompt itself. Nothing normative lives in more than one of these places.
 3. **RED → GREEN where implementation is involved.** Activate or write
    the failing test for the manifest's `owned_normative_ids` before
    writing the corresponding production code. Do not write production
-   code first and backfill a test.
+   code first and backfill a test. Complete the mandatory
+   Production-reachability preflight below before relying on a RED→GREEN
+   proof for a production transition or composed capability.
 4. **Build a Contract Collision Table before editing any code.** See
    "Contract Collision preflight" below. This step is mandatory and
    comes before the first production-code edit, not after.
@@ -100,3 +106,30 @@ review after the fact. A Contract Collision Table completed before
 editing would have surfaced "counter + log line" assigned to one
 requirement ID spanning two different gates' owned modules as a
 conflict to resolve before writing code, not after.
+
+## Production-reachability preflight (mandatory)
+
+For every production state transition or composed capability relied upon by a
+capability, incident, recovery, or safety decision, at least one acceptance
+test MUST exercise a trajectory that the real upstream system can physically
+produce under the actual production cadence, sandbox, provider topology, and
+lifecycle.
+
+For each affected gate, identify as applicable:
+
+- the real upstream producer;
+- the production constructor or call site;
+- the production cadence and lifecycle;
+- the actual sandbox and provider topology;
+- degraded or absent behavior; and
+- composition proof rather than component-only proof.
+
+Direct construction of a post-transition model is insufficient when the gate
+relies on a production transition or composition.
+
+This rule follows accepted Phase 2 evidence: synthetic health-event shapes that
+bypassed real dwell advancement; a production event path whose progression could
+not reach an incident; a complete PSI library with no production constructor; an
+EWMA test trajectory the kernel could not produce; and a capability/public
+summary contradiction visible only under the real daemon sandbox. These are
+historical evidence for the universal rule, not new normative IDs.
