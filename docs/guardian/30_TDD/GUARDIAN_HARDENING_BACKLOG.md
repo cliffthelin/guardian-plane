@@ -182,6 +182,191 @@ open, to establish the mechanism.
   **Revisit trigger/phase**: a future pass that either wires `status`
   updates into gate-closure procedure or removes the field if it is not
   meant to be load-bearing.
+  **Status**: open — deliberately NOT closed at Phase 2 milestone
+  publication. That pass (`docs/evidence/p2/PHASE2_MILESTONE.md`,
+  governance item G-1) confirmed the finding, extended it to a sixth
+  manifest (the PSI inherited-descriptor-ingress gate, same defect), and
+  annotated all six in place: each now carries a dated `RESOLVED
+  2026-09-11` comment naming its accepting commit and stating explicitly
+  that the `status` field is stale, non-authoritative historical
+  metadata, and that acceptance authority is the accepted commit + the
+  independent verdict and evidence + the milestone record. The stale
+  values themselves were left at `"not-started"` on purpose: this
+  entry's own revisit trigger prescribes either wiring lifecycle status
+  into gate-closure procedure or removing the field, and neither has
+  happened. The repository defines no status vocabulary at all (there is
+  no schema behind `schema_version = 1`, and `"not-started"` is itself
+  undocumented), so assigning a coined terminal value during a
+  publication pass would have silently settled an open design question
+  by inventing semantics. An explicitly-marked stale field is the more
+  honest interim state. This entry stays open until the mechanism
+  decision is actually made.
+
+### From the Phase 2 PSI inherited-descriptor ingress final acceptance repair (`docs/evidence/p2/PHASE2_PSI_INHERITED_DESCRIPTOR_INGRESS_EVIDENCE.md`, independent re-review)
+
+- **Source gate**: Phase 2 PSI inherited-descriptor ingress, final
+  acceptance repair (found by the independent focused re-review, not by
+  the repair itself)
+  **Finding**: the two tests added for the Part B (CLOEXEC) fix only
+  prove that `acquire_canonical_listen_fds()` returns `Ok(0)` and does
+  not panic in a non-activated test process; neither asserts
+  `FD_CLOEXEC` on anything. Deleting the canonical-acquisition call from
+  `psi_descriptor_plan_from_env` would leave all 475 workspace tests
+  green while silently regressing CLOEXEC.
+  **Why non-blocking**: the fix itself is proven — by live evidence
+  (`/proc/<pid>/fdinfo` inspection against the real installed daemon
+  across the normal case, a restart, the `:graceful` case, and FD
+  renumbering), not by these two tests. Only the *regression guard* is
+  missing, not the property itself.
+  **Revisit trigger/phase**: a future pass over `psi_ingress.rs` tests
+  that adds a source-text production guard analogous to
+  `dbus_surface_never_opens_psi_by_pathname` — e.g. asserting the
+  production region reachable from `psi_descriptor_plan_from_env`
+  contains the `acquire_canonical_listen_fds()` call.
+  **Status**: open.
+
+- **Source gate**: Phase 2 PSI inherited-descriptor ingress, final
+  acceptance repair
+  **Finding**: Guardian validates `LISTEN_PID` (via two independent
+  implementations that must agree) but not `LISTEN_PIDFDID`, a genuine
+  divergence from the systemd-259 native activation contract that is
+  live and exercised on the reference platform, not merely absent.
+  **Why non-blocking**: independently adjudicated — "PIDFDID
+  NON-BLOCKING — DIFFERENCE PROVEN IMMATERIAL UNDER GOVERNED PRODUCTION
+  MODEL." The one guarantee `LISTEN_PIDFDID` adds over `LISTEN_PID`
+  (rejecting a recycled-PID collision) describes a delivery window that
+  does not exist in Guardian's consumption model (environment read once,
+  atomically, at startup, in a freshly-`execve`'d child); every other
+  threat it might guard against is already available to exactly the
+  actor who could forge `LISTEN_PID` itself.
+  **Revisit trigger/phase**: if the production/threat model ever widens
+  beyond a single systemd-launched instance (e.g. descriptors consumed
+  after a re-exec, or `LISTEN_*` propagated through an intermediary).
+  Closure path if needed: a ~10-line safe `nix::fstat`-based pidfd-inode
+  comparison, using the already-present transitive `nix` dependency, no
+  new `unsafe`.
+  **Status**: open.
+
+- **Source gate**: Phase 2 PSI inherited-descriptor ingress, final
+  acceptance repair
+  **Finding**: adopting `libsystemd` 0.7.2 for one `fcntl`-based
+  `FD_CLOEXEC` call pulled in 8 new crates (including an HMAC-SHA256
+  primitive and a full `nom` parser-combinator stack, neither used by
+  Guardian's actual call path). The candidate evaluation compared three
+  systemd-protocol crates but never evaluated the minimal primitive: bare
+  `nix::fcntl` (already a transitive dependency) would deliver
+  byte-identical CLOEXEC semantics for 2 crates instead of 8, with zero
+  new `unsafe`.
+  **Why non-blocking**: defensible trade-off, not an oversight in the
+  shipped decision — `libsystemd` also provides an independent,
+  separately-maintained re-implementation of the `LISTEN_PID` check that
+  Guardian cross-validates against and fails closed on disagreement,
+  which bare `nix::fcntl` would forfeit. The evaluation as documented is
+  incomplete (it should have named and rejected the `nix`-only
+  alternative explicitly), but the chosen dependency is proportionate in
+  outcome.
+  **Revisit trigger/phase**: a future dependency-audit pass, or if
+  `libsystemd`'s maintenance status changes.
+  **Status**: open.
+
+- **Source gate**: Phase 2 PSI inherited-descriptor ingress, final
+  acceptance repair
+  **Finding**: `LISTEN_PID`/`LISTEN_PIDFDID`/`LISTEN_FDS`/`LISTEN_FDNAMES`
+  are deliberately never unset from the daemon's environment after
+  activation is consumed (`unset_env: false`), unlike native
+  `sd_listen_fds(1)`.
+  **Why non-blocking**: equivalent to the native `sd_listen_fds(0)` mode,
+  which is itself a supported native option. Stale reconsumption is
+  independently closed two other ways: `psi_descriptor_plan_from_env()`
+  is called exactly once, before the D-Bus server is built, and the
+  daemon never `exec`s a child (verified by reading the call graph); even
+  in a hypothetical future self-`exec`, `FD_CLOEXEC` has already closed
+  the raw descriptors by then.
+  **Revisit trigger/phase**: any future change that introduces a
+  self-`exec` or child-process spawn from `guardian-daemon`.
+  **Status**: open.
+
+- **Source gate**: Phase 2 PSI inherited-descriptor ingress, final
+  acceptance repair
+  **Finding**: `ListCapabilities` (a `CAPABILITY_REGISTRY_TICK_INTERVAL
+  = 30s`-refreshed snapshot) and `PsiSummary` (a live read) share one
+  authoritative `PsiAvailability` state but not one sampling instant —
+  after a runtime PSI degradation, `PsiSummary` can flip before
+  `ListCapabilities` catches up, for up to ~30s.
+  **Why non-blocking**: this is not the structural, permanent
+  contradiction the repair fixed (that was closed and live-verified in
+  both the normal and `:graceful` states); it is bounded staleness
+  inherent to a periodically-refreshed registry snapshot shared by all
+  six capability providers, not specific to PSI.
+  **Revisit trigger/phase**: a future gate that needs sub-30s capability-
+  registry freshness for any provider, or that unifies the registry-tick
+  and live-read sampling models.
+  **Status**: open.
+
+- **Source gate**: Phase 2 PSI inherited-descriptor ingress, final
+  acceptance repair
+  **Finding**: Guardian does not verify inherited PSI descriptors are
+  actually procfs pressure files (e.g. via `statfs`/`PROC_SUPER_MAGIC`)
+  before trusting them — only their advertised `LISTEN_FDNAMES` name and
+  `LISTEN_PID` match are checked.
+  **Why non-blocking**: only exploitable by an actor who can already
+  `execve` `guardian-daemon` with a controlled environment and controlled
+  fds 3/4/5 — i.e. one who controls the root-owned unit file or is root,
+  under the governed production model where the launcher is PID 1. Such
+  an attacker has far more direct paths available than forging PSI
+  readings.
+  **Revisit trigger/phase**: a future hardening pass, or if Guardian's
+  threat model is extended to include a launcher less trusted than
+  systemd/root.
+  **Status**: open.
+
+- **Source gate**: Phase 2 PSI inherited-descriptor ingress, final
+  acceptance repair
+  **Finding**: the implementation's own final-acceptance self-report
+  enumerated 7 focused-repair files; the actual working tree at review
+  time held 8 untracked files — the omitted one was
+  `docs/guardian/30_TDD/gates/phase2-psi-production-ingress-preflight.md`
+  (the Contract Collision stop-and-report record, which predates the
+  repair and contains no code).
+  **Why non-blocking**: documentation-only omission from a self-report's
+  file inventory; the file itself was reviewed, was legitimately in
+  scope, and its absence from the count did not hide any unreviewed
+  change. Execution-protocol step 7 already requires reviewers to derive
+  the changed-file set from Git directly rather than trust an
+  implementer's inventory, which is exactly what caught this.
+  **Revisit trigger/phase**: none specific — recorded so the pattern
+  (self-reported file counts should be cross-checked against `git
+  status`, not trusted) stays visible.
+  **Status**: closed — the file is included in the landing commit
+  (`5ff2df0`) and accounted for in
+  `docs/evidence/p2/PHASE2_MILESTONE.md`.
+
+- **Source gate**: Phase 2 PSI inherited-descriptor ingress, final
+  acceptance repair
+  **Finding**: the independent re-review of the physical/production-
+  reachability defect class (see below) observed the same underlying
+  failure mode recur across five separate Phase 2 instances (Gate 2a
+  health-lifecycle repair, Gate 2b integration repair, PSI production
+  instantiation, the PSI threshold repair, and the Capabilities1/
+  PsiSummary contradiction itself) — a fully green test suite repeatedly
+  coexisted with a production code path that could never physically
+  reach the behavior the tests exercised, because the tests drove
+  synthetic/direct input rather than the real production trajectory at
+  the real sampling cadence.
+  **Why non-blocking**: each of the five instances was independently
+  found and repaired at the gate where it occurred; there is no current
+  unrepaired instance. This entry exists to make the recurring pattern
+  itself visible, since no existing normative rule in
+  `GUARDIAN_EXECUTION_PROTOCOL.md` currently names it.
+  **Revisit trigger/phase**: a future Phase 3 contract/protocol pass
+  should consider minting a normative rule requiring evidence to show a
+  given input/measurement is physically producible at the production
+  sampling cadence through the actual production call path — not merely
+  constructible in a unit test — with a defined proof-obligation form
+  (an EWMA/arithmetic argument, a call-graph argument, or a live
+  sandboxed-production-surface argument, depending on what is being
+  proven). The five instances above are the evidentiary basis if/when
+  that rule is drafted.
   **Status**: open.
 
 ## Rule

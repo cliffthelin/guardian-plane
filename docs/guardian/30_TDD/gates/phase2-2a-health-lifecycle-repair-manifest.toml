@@ -15,6 +15,22 @@
 schema_version = 1
 gate_id = "phase2-2a-health-lifecycle-repair"
 kind = "reopened-gate-repair"
+# RESOLVED 2026-09-11: this gate is ACCEPTED (commit 0d071e1); see
+# docs/evidence/p2/PHASE2_MILESTONE.md (governance item G-1).
+#
+# The `status` field below is STALE, NON-AUTHORITATIVE historical
+# metadata. It was never updated on closure anywhere in the Phase 2
+# manifest set, and no gate's scope, evidence, or validation gating
+# reads or depends on it. Acceptance authority is the accepted commit +
+# the independent verdict and evidence + PHASE2_MILESTONE.md — never
+# this field.
+#
+# It is deliberately left at its historical value rather than assigned a
+# coined terminal value: the governing design decision (either wire
+# lifecycle status updates into gate-closure procedure, or remove the
+# field as non-load-bearing) is still OPEN in
+# GUARDIAN_HARDENING_BACKLOG.md. Closure is not the place to settle that
+# by inventing vocabulary.
 status = "not-started"
 
 # The gate this repair reopens, and exactly which of its already-closed
