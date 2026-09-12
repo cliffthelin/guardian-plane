@@ -2,7 +2,7 @@
 title: "Guardian Wiki Index"
 kind: "index"
 status: "active"
-last_reviewed: "2026-08-30"
+last_reviewed: "2026-09-11"
 tags:
   - guardian
   - wiki
@@ -43,10 +43,19 @@ Local, self-contained Markdown navigation layer for Guardian and I/O Guardian de
 
 ## TDD / build navigation
 
+Start here when you do not yet know which document governs a task.
+
+- [Guardian Execution Protocol](30_TDD/GUARDIAN_EXECUTION_PROTOCOL.md) — universal per-task procedure, the mandatory Contract Collision and Production-reachability preflights
+- [Guardian Phase Spec Doctrine](30_TDD/GUARDIAN_PHASE_SPEC_DOCTRINE.md) — authority boundary for Master-Spec phase planning documents
+- [TDD Gate Index](30_TDD/TDD_Gate_Index.md) — the single navigation hop for **both** accepted gate history (G0–G9, Wave 1) **and** the Master-Spec Phase 2–6 execution-planning documents
+- [Guardian Hardening Backlog](30_TDD/GUARDIAN_HARDENING_BACKLOG.md) — non-blocking findings and their dispositions
 - [Phase 0 contract research](30_TDD/GUARDIAN_PHASE_0_CONTRACT_RESEARCH.md)
 - [Phase 0/1 TDD contract](30_TDD/GUARDIAN_PHASE_0_1_TDD_CONTRACT.md)
-- [TDD Gate Index](30_TDD/TDD_Gate_Index.md)
 - [Self Lookup Map](LOOKUP_MAP.md)
+
+Individual Phase Execution Specs and Phase TDDs are reached through the
+TDD Gate Index rather than listed again here — one authoritative
+navigation hop, not a duplicate link inventory.
 
 ## External reference layer
 

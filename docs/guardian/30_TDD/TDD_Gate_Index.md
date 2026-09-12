@@ -2,7 +2,7 @@
 title: "TDD Gate Index"
 kind: "tdd-index"
 status: "active"
-last_reviewed: "2026-09-03"
+last_reviewed: "2026-09-11"
 tags:
   - tdd
   - gates
@@ -37,6 +37,44 @@ terminology.
 |---|---|---|---|
 | Wave 1 | First production mutation (systemd `cups-restart`) — **PASS, tagged `wave1-first-production-mutation`** | [TDD contract §50](GUARDIAN_PHASE_0_1_TDD_CONTRACT.md) | [Implementation](GUARDIAN_WAVE1_IMPLEMENTATION_HANDOFF.md), [Independent review](GUARDIAN_WAVE1_INDEPENDENT_REVIEW_HANDOFF.md), [Milestone](../../evidence/wave1/WAVE1_MILESTONE.md) |
 
+## Master-Spec Phase 2–6 execution planning (not numbered gates)
+
+Separate from everything above. The rows below are **Phase Execution Specs
+and Phase TDDs**: mutable planning and proof-route documents governed by
+[Guardian Phase Spec Doctrine](GUARDIAN_PHASE_SPEC_DOCTRINE.md) and
+subordinate to the [Guardian Master Spec](../00_Project/GUARDIAN_MASTER_SPEC.md),
+accepted contracts, gate manifests/TDDs and ADRs. They do not become
+normative merely by living under `30_TDD/`.
+
+They are **not** numbered legacy gates, they do not occupy a `G<n>` slot,
+and their presence here is **not** evidence that a Master-Spec phase has
+passed or closed. Universal per-task procedure — including the mandatory
+Production-reachability preflight the phase documents apply but do not
+own — lives in
+[Guardian Execution Protocol](GUARDIAN_EXECUTION_PROTOCOL.md).
+
+Master-Spec phase numbering is independent of the historical
+implementation milestone **Phase 2 — Observability & Correlation** (tag
+`phase2-observability-correlation`). In particular, Master-Spec Phase 2 is
+I/O Guardian and Master-Spec Phase 3 is Observability; neither is that
+milestone, and the milestone is not completion of either.
+
+| Master-Spec phase | Execution Spec | Phase TDD |
+|---|---|---|
+| Phase 2 — I/O Guardian | [Execution Spec](phases/ms-phase2-io-guardian-execution-spec.md) | [Phase TDD](phases/ms-phase2-io-guardian-tdd.md) |
+| Phase 3 — Observability | [Execution Spec](phases/ms-phase3-observability-execution-spec.md) | [Phase TDD](phases/ms-phase3-observability-tdd.md) |
+| Phase 4 — Thermal & Power | [Execution Spec](phases/ms-phase4-thermal-power-execution-spec.md) | [Phase TDD](phases/ms-phase4-thermal-power-tdd.md) |
+| Phase 5 — Logs & Incidents | [Execution Spec](phases/ms-phase5-logs-incidents-execution-spec.md) | [Phase TDD](phases/ms-phase5-logs-incidents-tdd.md) |
+| Phase 6 — System Management | [Execution Spec](phases/ms-phase6-system-management-execution-spec.md) | [Phase TDD](phases/ms-phase6-system-management-tdd.md) |
+
+Each phase document carries its own gate plan, decision history, exit
+criteria and proof obligations. Read them there; they are deliberately not
+duplicated into this index.
+
 ## Rule
 
 Do not duplicate detailed acceptance criteria here. The TDD contract is authoritative; this page exists so a coding agent can navigate from a gate to the relevant concepts and external provider sources.
+
+The same rule governs the Master-Spec phase table above: it is navigation
+only. Phase gate plans, decision histories and acceptance obligations are
+authoritative in the linked Phase Execution Spec and Phase TDD, never here.

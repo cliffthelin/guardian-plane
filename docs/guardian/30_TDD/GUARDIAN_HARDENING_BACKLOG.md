@@ -2,7 +2,7 @@
 title: "Guardian Hardening Backlog"
 kind: "hardening-backlog"
 status: "active"
-last_reviewed: "2026-09-07"
+last_reviewed: "2026-09-11"
 tags:
   - tdd
   - backlog
@@ -182,8 +182,8 @@ open, to establish the mechanism.
   **Revisit trigger/phase**: a future pass that either wires `status`
   updates into gate-closure procedure or removes the field if it is not
   meant to be load-bearing.
-  **Status**: open — deliberately NOT closed at Phase 2 milestone
-  publication. That pass (`docs/evidence/p2/PHASE2_MILESTONE.md`,
+  **Prior disposition (Phase 2 milestone publication, preserved)**: not
+  closed at that pass. It (`docs/evidence/p2/PHASE2_MILESTONE.md`,
   governance item G-1) confirmed the finding, extended it to a sixth
   manifest (the PSI inherited-descriptor-ingress gate, same defect), and
   annotated all six in place: each now carries a dated `RESOLVED
@@ -193,14 +193,32 @@ open, to establish the mechanism.
   independent verdict and evidence + the milestone record. The stale
   values themselves were left at `"not-started"` on purpose: this
   entry's own revisit trigger prescribes either wiring lifecycle status
-  into gate-closure procedure or removing the field, and neither has
-  happened. The repository defines no status vocabulary at all (there is
-  no schema behind `schema_version = 1`, and `"not-started"` is itself
-  undocumented), so assigning a coined terminal value during a
-  publication pass would have silently settled an open design question
-  by inventing semantics. An explicitly-marked stale field is the more
-  honest interim state. This entry stays open until the mechanism
-  decision is actually made.
+  into gate-closure procedure or removing the field, and neither had
+  happened at that point. The repository defines no status vocabulary at
+  all (there is no schema behind `schema_version = 1`, and
+  `"not-started"` is itself undocumented), so assigning a coined terminal
+  value during a publication pass would have silently settled an open
+  design question by inventing semantics. An explicitly-marked stale
+  field was the more honest interim state.
+  **Status**: closed — resolved by commit
+  `4710ecd092db368bf91bb37b9eac4904d67baa66`. The revisit trigger's
+  second branch was taken:
+  `docs/guardian/30_TDD/GUARDIAN_PHASE_SPEC_DOCTRINE.md` now establishes
+  the gate-manifest convention that new gate manifests omit a lifecycle
+  `status` field unless a future governed schema explicitly reintroduces
+  one, and that existing historical manifests retain their status fields
+  as preserved, stale, non-authoritative history and are not
+  retroactively edited for this convention. The mechanism question that
+  kept this entry open is therefore settled going forward.
+
+  Scope of the resolution, stated precisely: the closure is **omit the
+  field going forward and preserve historical stale metadata**. It is not
+  "update the old statuses." No historical manifest was edited by that
+  commit, and the six Phase 2 manifests' existing `status =
+  "not-started"` values did **not** become accurate — they remain stale
+  metadata, now explicitly annotated as such and explicitly
+  non-authoritative. Acceptance authority remains the accepted commit
+  plus the independent verdict/evidence plus the milestone record.
 
 ### From the Phase 2 PSI inherited-descriptor ingress final acceptance repair (`docs/evidence/p2/PHASE2_PSI_INHERITED_DESCRIPTOR_INGRESS_EVIDENCE.md`, independent re-review)
 
@@ -367,7 +385,30 @@ open, to establish the mechanism.
   sandboxed-production-surface argument, depending on what is being
   proven). The five instances above are the evidentiary basis if/when
   that rule is drafted.
-  **Status**: open.
+  **Status**: closed — resolved by commit
+  `4710ecd092db368bf91bb37b9eac4904d67baa66`, which added the mandatory
+  universal **Production-reachability preflight** to
+  `docs/guardian/30_TDD/GUARDIAN_EXECUTION_PROTOCOL.md`. That section
+  requires, for every production state transition or composed capability
+  relied upon by a capability, incident, recovery or safety decision, at
+  least one acceptance test exercising a trajectory the real upstream
+  system can physically produce under the actual production cadence,
+  sandbox, provider topology and lifecycle. The same commit's
+  `GUARDIAN_PHASE_SPEC_DOCTRINE.md` assigns ownership of that universal
+  rule to the Execution Protocol rather than to any phase identifier, so
+  phase documents apply it without redefining it. It carries no normative
+  ID: every `P0`/`P1`/`P2` ID in this repository is phase-scoped and
+  owned by a gate manifest, and an ID here would wrongly imply manifest
+  ownership of a rule that binds every gate. The five instances above are
+  preserved in that section as its historical justification.
+
+  Scope of the resolution, stated precisely: this finding was a
+  **forward doctrine/governance gap** — the recurring pattern had no
+  named rule — and that forward gap is what the commit closed. No
+  historical Phase 2 implementation was retroactively changed by it. Each
+  of the five instances had already been found and repaired at the gate
+  where it occurred, and those repairs and their evidence stand
+  unmodified.
 
 ## Rule
 
