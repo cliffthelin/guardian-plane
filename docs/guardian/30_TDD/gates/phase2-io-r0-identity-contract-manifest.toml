@@ -1,0 +1,77 @@
+# Guardian gate manifest — configuration only.
+# Read with GUARDIAN_EXECUTION_PROTOCOL.md and the linked gate TDD.
+
+schema_version = 1
+gate_id = "phase2-io-r0-identity-contract"
+kind = "new-implementation-gate"
+baseline_sha = "d1389378fb8dd0ac19b67d92b7b0a83a8b7e7d5a"
+tdd_file = "docs/guardian/30_TDD/gates/phase2-io-r0-identity-contract-tdd.md"
+
+# Minted by TDD contract §52. T2-R0-C/T2-R0-D are planning labels.
+owned_normative_ids = ["P2-EVT-010"]
+
+dependencies = ["phase2-io-r0-access-topology"]
+
+[allowed_scope]
+paths = [
+    # Future gate-execution paths. The models, exports, tests, and evidence do
+    # not exist and are not created by this gate-artifact preparation pass.
+    "crates/guardian-provider-api/src/evidence.rs",
+    "crates/guardian-provider-api/src/lib.rs",
+    "crates/guardian-provider-api/tests/io_evidence_completeness_contract.rs",
+    "crates/guardian-core/src/io_identity.rs",
+    "crates/guardian-core/src/lib.rs",
+    "crates/guardian-core/tests/io_identity_contract.rs",
+    "docs/evidence/p2/PHASE2_IO_R0_IDENTITY_CONTRACT_EVIDENCE.md",
+    # Current gate-definition artifacts.
+    "docs/guardian/30_TDD/gates/phase2-io-r0-identity-contract-manifest.toml",
+    "docs/guardian/30_TDD/gates/phase2-io-r0-identity-contract-tdd.md",
+]
+
+[forbidden_scope]
+paths = [
+    "crates/guardian-core/src/correlation.rs",
+    "crates/guardian-core/src/incident.rs",
+    "crates/guardian-core/src/providers/udisks.rs",
+    "crates/guardian-core/src/transaction/**",
+    "crates/guardian-daemon/src/**",
+    "crates/guardian-daemon/tests/dbus_contract.rs",
+    "crates/guardian-helper/**",
+    "crates/guardian-client/**",
+    "debian/**",
+    "data/dbus-1/system.d/**",
+    "data/polkit-1/**",
+    "AGENTS.md",
+    "docs/guardian/00_Project/GUARDIAN_MASTER_SPEC.md",
+    "docs/guardian/30_TDD/GUARDIAN_EXECUTION_PROTOCOL.md",
+    "docs/guardian/30_TDD/GUARDIAN_PHASE_SPEC_DOCTRINE.md",
+    "docs/guardian/30_TDD/GUARDIAN_PHASE_0_1_TDD_CONTRACT.md",
+    "docs/guardian/30_TDD/GUARDIAN_PHASE2_IMPLEMENTATION_HANDOFF.md",
+    "docs/guardian/30_TDD/phases/**",
+]
+
+required_test_layers = ["layer1", "layer2"]
+
+[validation_commands]
+fmt = "cargo fmt --check"
+clippy = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+test = "cargo test --workspace"
+expected_baseline = "475 passed, 0 failed, 4 ignored (published Phase 2 milestone baseline; baseline_sha d1389378)"
+
+required_evidence = [
+    "P2-EVT-010: tests keep observation identity distinct from mutation-grade target identity and prove neither can be constructed from a volatile name or pathname alone",
+    "P2-EVT-010: stale/reuse tests cover physical device/block/partition/filesystem/mount, process, cgroup, systemd manager/unit/scope/invocation, block mapping, and observation source/cursor/revision lifecycles",
+    "P2-EVT-010 plus GP-05/GP-06/§14.2: mutation-grade target validation fails closed for multiple workloads, protected targets, controller absence, ancestor constraints, moved targets, reinvoked units, mapping or membership changes, arbitration revision changes, and incomplete affected-workload identity",
+    "P2-EVT-010: accepted UDisks identity is consumed without modification and accepted correlation keying, IncidentWire, public Incident shape, D-Bus API, and authorization semantics remain unchanged",
+    "P2-EVT-010: no mutation is performed and no apply/observe/confirm/commit/rollback or helper path is introduced",
+]
+
+commit_policy = "leave-uncommitted-for-independent-review"
+next_gate = "future R1/R2A manifests only after independent acceptance; no production provider or mutation scope is authorized here"
+
+# Only the exact new evidence/completeness and I/O identity modules plus their
+# contract tests are authorized. Existing UDisks, correlation, incident,
+# transaction, daemon, helper, public API, and authorization code are read-only.
+# If the accepted G-A decision requires a different production integration path
+# or a correlation-key change, STOP and amend governance rather than widening
+# this gate.

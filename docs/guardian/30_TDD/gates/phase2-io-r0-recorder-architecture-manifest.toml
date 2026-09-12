@@ -1,0 +1,84 @@
+# Guardian gate manifest — configuration only.
+# Read with GUARDIAN_EXECUTION_PROTOCOL.md and the linked gate TDD.
+
+schema_version = 1
+gate_id = "phase2-io-r0-recorder-architecture"
+kind = "new-implementation-gate"
+baseline_sha = "d1389378fb8dd0ac19b67d92b7b0a83a8b7e7d5a"
+tdd_file = "docs/guardian/30_TDD/gates/phase2-io-r0-recorder-architecture-tdd.md"
+
+# Minted by TDD contract §52. T2-R0-E is a planning label, not an ID.
+owned_normative_ids = [
+    "P2-REC-006",
+    "P2-VM-005",
+]
+
+# Independent R0 root. G-A/G-B are deliberately not dependencies.
+dependencies = []
+
+[allowed_scope]
+paths = [
+    # Future gate-execution paths. The tests, bounded probe, ADR, and evidence
+    # do not exist and are not created by this gate-artifact preparation pass.
+    "crates/guardian-core/tests/recorder_lifecycle_contract.rs",
+    "crates/guardian-daemon/tests/recorder_intake_contract.rs",
+    "crates/guardian-daemon/examples/r0_recorder_architecture_probe.rs",
+    "docs/adr/ADR-011-guardian-recorder-lifecycle-and-intake.md",
+    "docs/evidence/p2/PHASE2_IO_R0_RECORDER_ARCHITECTURE_EVIDENCE.md",
+    "docs/evidence/p2/PHASE2_IO_R0_RECORDER_ARCHITECTURE_VM_EVIDENCE.md",
+    # Current gate-definition artifacts.
+    "docs/guardian/30_TDD/gates/phase2-io-r0-recorder-architecture-manifest.toml",
+    "docs/guardian/30_TDD/gates/phase2-io-r0-recorder-architecture-tdd.md",
+]
+
+[forbidden_scope]
+paths = [
+    # Current production files are evidence only until the ADR selects scope.
+    "crates/guardian-core/src/recorder.rs",
+    "crates/guardian-daemon/src/**",
+    "crates/guardian-helper/**",
+    "crates/guardian-client/**",
+    "debian/**",
+    "data/dbus-1/system.d/**",
+    "data/polkit-1/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "crates/*/Cargo.toml",
+    # Accepted incident/correlation semantics cannot be reopened.
+    "crates/guardian-core/src/correlation.rs",
+    "crates/guardian-core/src/incident.rs",
+    "crates/guardian-core/tests/correlation_contract.rs",
+    "AGENTS.md",
+    "docs/guardian/00_Project/GUARDIAN_MASTER_SPEC.md",
+    "docs/guardian/30_TDD/GUARDIAN_EXECUTION_PROTOCOL.md",
+    "docs/guardian/30_TDD/GUARDIAN_PHASE_SPEC_DOCTRINE.md",
+    "docs/guardian/30_TDD/GUARDIAN_PHASE_0_1_TDD_CONTRACT.md",
+    "docs/guardian/30_TDD/GUARDIAN_PHASE2_IMPLEMENTATION_HANDOFF.md",
+    "docs/guardian/30_TDD/phases/**",
+]
+
+required_test_layers = ["layer1", "layer2", "layer4"]
+
+[validation_commands]
+fmt = "cargo fmt --check"
+clippy = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+test = "cargo test --workspace"
+expected_baseline = "475 passed, 0 failed, 4 ignored (published Phase 2 milestone baseline; baseline_sha d1389378)"
+
+required_evidence = [
+    "P2-REC-006: behavior-first RED contract covers daemon failure/restart, D-Bus-serving failure, intake unavailability/backpressure, dropped-event accounting, /var unavailable/read-only/full, persistence-worker blocking/failure, reboot/boot provenance, bounds, replay, ingress epochs, and accepted Incident loss",
+    "P2-REC-006: experiments fairly compare the current embedded recorder, an independent minimal recorder process, and a serious repository-supported intermediate lifecycle without preselecting a winner",
+    "P2-REC-006: ADR-011 records the behavior evidence, decision, rejected alternatives, unavoidable boot gap, intake and storage boundaries, security consequences, and exact post-decision production-scope amendment",
+    "P2-REC-006: if evidence survives daemon restart, tests require explicit boot/daemon/ingress-epoch provenance, no live-Incident reopening, no pre-restart Incident resurrection, and no historical-evidence correlation except through a separately governed path",
+    "P2-VM-005: raw reference-environment evidence exercises the selected lifecycle against every required failure and boundedness case and preserves accepted fresh-epoch/in-memory-Incident-loss semantics",
+    "Security: any candidate needing new privilege, expanded helper authority, a generic broker, relaxed daemon hardening, or changed provider authorization stops for governance review",
+]
+
+commit_policy = "leave-uncommitted-for-independent-review"
+next_gate = "post-decision manifest amendment naming only the production files selected by ADR-011; R3 implementation is not authorized by this manifest"
+
+# The initial gate authorizes behavior contracts, one bounded probe, the
+# decision ADR, and evidence only. It authorizes no production recorder process,
+# unit, IPC, storage, Cargo/package, daemon, core, helper, or public API change.
+# After candidate comparison and ADR acceptance, amend the manifest with the
+# exact selected production scope before implementation.
