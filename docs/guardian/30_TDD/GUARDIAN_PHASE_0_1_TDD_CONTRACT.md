@@ -3201,3 +3201,100 @@ transaction observability turns out to be required, not deferrable),
 that finding amends this section explicitly, the same way §50 was
 revised in place six times — it does not silently expand scope inside
 an implementation handoff alone.
+
+---
+
+# 52. Amendment — Master-Spec Phase 2 R0-GOV normative-ID mint (2026-09-11)
+
+- Status: **OWNER-CONFIRMED 2026-09-11** — governance mint; implementation
+  remains separately gated.
+- Published base: `dde671588ef0044744b0a3696ce5b8908870fe35`.
+- Scope: the five requirements below and their normative-ID inventory in
+  `GUARDIAN_PHASE2_IMPLEMENTATION_HANDOFF.md` §19.
+
+## Authority and numbering
+
+The project owner explicitly authorizes and confirms this R0-GOV mint.
+This is the owner governance act, not a pending-confirmation request.
+Following §51's PSI minting precedent and the implementation handoff's
+§19 numbering rule, this contract revision newly mints exactly five IDs:
+`P2-EVT-009`, `P2-EVT-010`, `P2-REC-006`, `P2-VM-004`, and
+`P2-VM-005`. Each takes the next unused number in its existing family,
+in sequence. The repository-wide check at the published base found
+maxima EVT 008, REC 005, and VM 003; the other families remain API 003,
+COR 007, and INC 004. Historical retired/demoted numbers remain consumed.
+No new family is created, no suffix-letter ID is introduced, and no
+existing ID is reused, renumbered, or changed in normative substance.
+
+This dated act extends §50/§51's historical reservation of the existing
+`P2-*` families to these five **Master-Spec Phase 2 — I/O Guardian R0**
+requirements only. It does not rename or reopen **TDD-contract Phase 2 —
+read-only observability & correlation**, whose historical milestone
+remains accepted at `phase2-observability-correlation`
+(`f311f131862628ea639c4cd8b1edeeb4f7dd0fda`). §47/§50/§51 and their
+historical scope, deferrals, and decisions are preserved above rather
+than silently rewritten. The new requirements establish R0 ownership;
+they do not authorize production implementation, persistence changes,
+new public APIs, mutations, or changes to accepted Incident semantics.
+
+## Normative IDs minted by this revision
+
+| ID | Requirement |
+|---|---|
+| `P2-EVT-009` *(new; OWNER-CONFIRMED 2026-09-11)* | Guardian's production I/O evidence sources MUST expose truthful evidence availability and completeness under the actual packaged production topology. An observation MUST be interpreted as authoritative absence only when the selected provider contract proves authoritative completeness for the target. Partial, unavailable, and unknown visibility MUST remain explicit and MUST fail safely; incomplete visibility MUST NOT be treated as proof that a filesystem is unused or as sufficient evidence for a safety decision that requires authoritative completeness. |
+| `P2-EVT-010` *(new; OWNER-CONFIRMED 2026-09-11)* | I/O evidence identity MUST remain stable and reuse-safe across the relevant physical-device/block/partition/filesystem/mount lifecycle, process lifetime, cgroup lifetime, systemd manager/unit/scope/invocation, current block-device mapping, and observation source/cursor/revision lifecycle. Stale, reused, or changed identity MUST be detectable and MUST NOT silently refer to a different resource. Mutation-grade I/O target criteria from `T2-R0-D` MUST bind as explicit acceptance criteria under this requirement together with the existing fail-closed and transaction-precondition authority (GP-05, GP-06, and §14.2 of `GUARDIAN_PHASE_0_1_TDD_CONTRACT.md`); they receive no standalone R0 normative ID. |
+| `P2-REC-006` *(new; OWNER-CONFIRMED 2026-09-11)* | Recorder lifecycle and intake semantics MUST satisfy the published `T2-R0-E` failure contract, including the required boot-onward collection and failure behavior, without weakening or redefining accepted bounded-ring semantics, fresh-ingress-epoch semantics, or the loss of in-memory Incident state on `guardian-daemon` restart. Architecture selection MUST follow behavior-first evidence; this requirement does not prescribe an independent recorder process. If recorder evidence survives a daemon restart, it MUST preserve boot/daemon/ingress-epoch provenance distinguishing pre- and post-restart records and MUST NOT silently replay persisted evidence as an already-open live Incident or resurrect pre-restart Incident state. Later correlation may reference historical recorder evidence only through an explicitly governed historical-evidence path. |
+| `P2-VM-004` *(new; OWNER-CONFIRMED 2026-09-11)* | Real disposable/reference-environment evidence MUST prove the selected G-A I/O evidence routes from the actual packaged production daemon/helper topology with the accepted daemon sandbox active and unchanged. Host-shell-only reachability is insufficient. The proof MUST exercise the real upstream producer, production consumer, production cadence, provider topology, sandbox, and lifecycle applicable to each source, including its partial, unavailable, or unknown visibility behavior. |
+| `P2-VM-005` *(new; OWNER-CONFIRMED 2026-09-11)* | Real reference-environment evidence MUST prove the selected recorder lifecycle under daemon failure/restart, D-Bus-serving failure, intake failure/backpressure, dropped-event accounting, `/var` unavailable/full/read-only behavior, persistence-worker blocking/failure, reboot/boot provenance, and bounded persistence/replay. The proof MUST exercise interaction with the accepted fresh-ingress-epoch and in-memory-Incident-loss behavior. If recorder evidence survives daemon restart, the proof MUST demonstrate preserved boot/daemon/ingress-epoch provenance, no replay as an already-open live Incident, no resurrection of pre-restart Incident state, and historical-evidence use only through an explicitly governed path. |
+
+## Intended future gate ownership and acceptance boundaries
+
+| Future gate | Planning coverage | Newly minted IDs to reference |
+|---|---|---|
+| G-A — access topology & completeness | `T2-R0-A` + `T2-R0-B` | `P2-EVT-009`, `P2-VM-004` |
+| G-B — I/O evidence & mutation-grade identity | `T2-R0-C` + `T2-R0-D` | `P2-EVT-010` |
+| G-C — recorder lifecycle & intake architecture | `T2-R0-E` | `P2-REC-006`, `P2-VM-005` |
+
+The planning references are the committed
+`phases/ms-phase2-io-guardian-execution-spec.md` §7 and
+`phases/ms-phase2-io-guardian-tdd.md` at the published base above.
+`T2-GOV` is SATISFIED and receives no manifest or normative ID.
+Planning `T2-*` labels remain non-normative.
+
+Access-route mechanics (native kernel/provider interface, supplied
+descriptor/channel, existing provider, or another governed route) remain
+acceptance criteria under G-A's requirements, not standalone normative
+IDs. The packaged sandbox is a constraint: evidence that a route needs a
+hardening-directive change triggers Contract Collision STOP/replan, not
+permission to relax the unit.
+
+Observation identity and mutation-grade target identity remain distinct
+within G-B. `T2-R0-D` specializes `P2-EVT-010` together with GP-05,
+GP-06, and §14.2: boot/process lifetime; systemd manager/unit/scope and
+invocation; cgroup lifetime/membership; controlled block-device mapping;
+controller availability and ancestor constraints; affected workloads;
+protected-target exclusions; and ownership/arbitration revision must be
+known and valid for a mutation-grade target. Its explicit acceptance
+cases include multiple workloads in one cgroup, protected system/Guardian
+targets, unavailable or ancestor-limited controllers, target movement
+after snapshot, unit reinvocation, and changed block mapping. These
+criteria receive no standalone R0-D ID; future R2A owns actual mutation
+behavior. No correlation-key, Incident wire-shape, helper mutation, or
+transaction-ownership change is authorized here.
+
+Recorder architecture remains an OPEN HYPOTHESIS. G-C must fairly compare
+the embedded recorder, an independent minimal recorder process, and a
+genuine repository-supported intermediate architecture against the
+published failure contract before selecting a route. Architecture
+candidates, experiments/spikes, and ADRs are not normative IDs.
+
+Production-reachability remains the universal, ID-less obligation owned
+by `GUARDIAN_EXECUTION_PROTOCOL.md`; the two new VM IDs own their
+specific R0 evidence obligations, not that universal procedure.
+
+No R0 manifest/TDD exists at this governance baseline. The three future
+manifest/TDD pairs will be prepared only after this R0-GOV pass is
+accepted and published. Those manifests will **reference** the IDs minted
+by this contract revision; they will not mint them. This amendment
+creates none of the six gate artifacts and starts no RED test,
+production implementation, or evidence/ADR work.
