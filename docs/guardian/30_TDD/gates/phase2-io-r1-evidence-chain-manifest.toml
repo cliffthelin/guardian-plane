@@ -1,0 +1,82 @@
+# Guardian gate manifest — definition only until a reviewed scope amendment.
+# Read with GUARDIAN_EXECUTION_PROTOCOL.md and the linked gate TDD.
+
+schema_version = 1
+gate_id = "phase2-io-r1-evidence-chain"
+kind = "new-implementation-gate"
+baseline_sha = "b867baf21bca9b7516fef9c92937a0b104504b8c"
+tdd_file = "docs/guardian/30_TDD/gates/phase2-io-r1-evidence-chain-tdd.md"
+
+# Text minted by contract §52; ownership transferred unchanged by §53.
+owned_normative_ids = [
+    "P2-EVT-009",
+    "P2-VM-004",
+]
+
+dependencies = [
+    "phase2-io-r0-access-topology",
+    "phase2-io-r0-identity-contract",
+    "phase2-io-r0-recorder-architecture",
+]
+
+[allowed_scope]
+paths = [
+    # Definition-only governance scope. Before RED or implementation, a
+    # separately reviewed amendment must replace/extend this list with exact
+    # test, evidence, ADR, and production paths derived from the accepted G-A
+    # source matrix. No production path is pre-authorized here.
+    "docs/guardian/30_TDD/gates/phase2-io-r1-evidence-chain-manifest.toml",
+    "docs/guardian/30_TDD/gates/phase2-io-r1-evidence-chain-tdd.md",
+]
+
+[forbidden_scope]
+paths = [
+    # Withheld until the separately reviewed exact-scope amendment.
+    "crates/guardian-daemon/src/**",
+    "crates/guardian-core/src/**",
+    "crates/guardian-provider-api/src/**",
+    "crates/guardian-helper/**",
+    "debian/**",
+    "data/dbus-1/system.d/**",
+    "data/polkit-1/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "crates/*/Cargo.toml",
+    # Existing authority and R0 artifacts are read-only during R1 execution.
+    "AGENTS.md",
+    "docs/guardian/00_Project/GUARDIAN_MASTER_SPEC.md",
+    "docs/guardian/30_TDD/GUARDIAN_EXECUTION_PROTOCOL.md",
+    "docs/guardian/30_TDD/GUARDIAN_PHASE_SPEC_DOCTRINE.md",
+    "docs/guardian/30_TDD/GUARDIAN_PHASE_0_1_TDD_CONTRACT.md",
+    "docs/guardian/30_TDD/GUARDIAN_PHASE2_IMPLEMENTATION_HANDOFF.md",
+    "docs/guardian/30_TDD/phases/**",
+    "docs/guardian/30_TDD/gates/phase2-io-r0-access-topology-manifest.toml",
+    "docs/guardian/30_TDD/gates/phase2-io-r0-access-topology-tdd.md",
+    "docs/guardian/30_TDD/gates/phase2-io-r0-identity-contract-manifest.toml",
+    "docs/guardian/30_TDD/gates/phase2-io-r0-identity-contract-tdd.md",
+    "docs/guardian/30_TDD/gates/phase2-io-r0-recorder-architecture-manifest.toml",
+    "docs/guardian/30_TDD/gates/phase2-io-r0-recorder-architecture-tdd.md",
+]
+
+required_test_layers = ["layer1", "layer2", "layer4"]
+
+[validation_commands]
+fmt = "cargo fmt --check"
+clippy = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+test = "cargo test --workspace"
+expected_baseline = "475 passed, 0 failed, 4 ignored (published Phase 2 milestone baseline; execution baseline must be refreshed by the required scope amendment)"
+
+required_evidence = [
+    "P2-EVT-009: a distinct R1 RED remains failing until every G-A-selected route has an actual production constructor/call site, packaged consumer, truthful Availability/Knowledge completeness behavior, and composition into shared ingress and the I/O correlation chain; rejected and explicitly unavailable decisions remain explicit and are not silently replaced",
+    "P2-EVT-009: aggregate counters never become request latency or process ownership; incomplete, unavailable, or unknown visibility never becomes authoritative absence or a filesystem-unused safety conclusion",
+    "P2-VM-004: real disposable/reference-environment evidence exercises every implemented selected route from its real upstream producer through the actual packaged production daemon/helper topology with the accepted sandbox unchanged",
+    "P2-VM-004: evidence records real cadence, startup/restart lifecycle, applicable disappearance/re-enumeration, degraded/loss/gap behavior, provider topology, production composition, and shared-ingress/I/O-correlation integration",
+    "G-A candidate-probe and host-shell evidence are inputs only and never substitute for R1 production proof",
+]
+
+commit_policy = "leave-uncommitted-for-independent-review"
+next_gate = "withheld until R1 scope, implementation sequence, and downstream dependency are separately reviewed"
+
+# This manifest defines ownership immediately so P2-EVT-009/P2-VM-004 are not
+# ownerless. It is intentionally not executable for implementation until its
+# exact allowed/forbidden production scope and refreshed baseline are approved.

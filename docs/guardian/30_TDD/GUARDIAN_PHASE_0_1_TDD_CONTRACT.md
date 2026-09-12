@@ -3298,3 +3298,73 @@ accepted and published. Those manifests will **reference** the IDs minted
 by this contract revision; they will not mint them. This amendment
 creates none of the six gate artifacts and starts no RED test,
 production implementation, or evidence/ADR work.
+
+---
+
+# 53. Amendment — G-A/R1 proof-ownership collision repair (2026-09-12)
+
+- Status: **OWNER-CONFIRMED 2026-09-12** — governance ownership repair;
+  G-A GREEN and R1 implementation remain separately gated.
+- Published base: `b867baf21bca9b7516fef9c92937a0b104504b8c`.
+- Collision provenance: the accepted G-A RED probe at SHA-256
+  `d224a52544dde336604abbdcb246fcc9eed9a46762777bff37b6ab8dab345952`.
+
+## Collision and preserved assurance
+
+The RED probe exposed an impossible gate contract. Section 52 assigned
+production-strength `P2-EVT-009` and `P2-VM-004` to G-A, while the Phase
+Execution Spec requires R0's access/topology decision before production
+provider implementation and G-A forbids production implementation. New source
+classes could therefore satisfy G-A only by implementing R1 early or by
+misrepresenting missing production wiring as rejection or unavailability.
+
+This amendment does not weaken either production requirement. Their normative
+text remains unchanged, and ownership moves atomically to the newly defined
+`phase2-io-r1-evidence-chain` gate. G-A instead owns a distinct, earlier
+candidate-access decision and production-equivalent-sandbox proof layer. The R1
+gate depends on all three R0 gates, so no requirement becomes ownerless and no
+forward dependency makes R0 require R1 implementation.
+
+## Normative IDs minted by this revision
+
+`P2-EVT-011` and `P2-VM-006` are the next unused numbers in their existing
+families. Historical retired or demoted IDs remain consumed. No new family,
+suffix-letter ID, reuse, or renumbering is introduced.
+
+| ID | Requirement |
+|---|---|
+| `P2-EVT-011` *(new; OWNER-CONFIRMED 2026-09-12)* | Before production I/O evidence provider implementation, every mandatory G-A source class MUST have a governed route decision of Selected, Rejected, or ExplicitlyUnavailable based on its real upstream source exercised in a disposable/reference environment under a proven production-equivalent reproduction of all source-relevant access constraints of the accepted Guardian execution topology. Availability, evidence completeness, and route decision MUST remain distinct. Each decision MUST define applicable cadence, lifecycle, disappearance/re-enumeration, loss/gap, privilege, sandbox, and diagnostic-budget semantics. Missing production wiring alone MUST NOT establish Rejected or ExplicitlyUnavailable. Any route requiring relaxation of the accepted sandbox or introduction of a new privilege topology MUST trigger Contract Collision STOP/replan. |
+| `P2-VM-006` *(new; OWNER-CONFIRMED 2026-09-12)* | Real disposable/reference-environment evidence MUST exercise every mandatory G-A candidate route against its real upstream producer from a probe whose access profile is proven equivalent for every source-relevant restriction to the accepted packaged Guardian execution boundary applicable to that candidate. The proof MUST record equivalence as applicable for user/group, capabilities, NoNewPrivileges, address-family/network restrictions, device policy, process visibility, kernel-log visibility, control-group protections, filesystem visibility, namespaces, and every other source-relevant restriction. It MUST cover applicable cadence feasibility, startup/restart, disappearance/re-enumeration, and loss/gap behavior and distinguish selected, rejected, explicitly unavailable, partial, and unknown results. Host-shell-only evidence is insufficient. This candidate proof MUST NOT be represented as proof of a production constructor, packaged consumer, or production composition. Those remain required by P2-EVT-009 and P2-VM-004 under R1. |
+
+## Repaired ownership and phase boundary
+
+| Gate | Planning coverage | Owned normative IDs |
+|---|---|---|
+| G-A — access topology and completeness | `T2-R0-A` + `T2-R0-B` | `P2-EVT-011`, `P2-VM-006` |
+| G-B — I/O evidence and mutation-grade identity | `T2-R0-C` + `T2-R0-D` | `P2-EVT-010` |
+| G-C — recorder lifecycle and intake architecture | `T2-R0-E` | `P2-REC-006`, `P2-VM-005` |
+| `phase2-io-r1-evidence-chain` — production I/O evidence chain | `T2-R1` | `P2-EVT-009`, `P2-VM-004` |
+
+G-A proves candidate/source access feasibility and completeness semantics under
+a production-equivalent reproduction of every source-relevant constraint. It
+does not require unimplemented production constructors or consumers, and it
+does not reject or declare a route unavailable merely because R1 has not built
+it. G-A evidence does not authorize observation through the privileged helper,
+a new privileged boundary, or relaxed daemon hardening.
+
+R1 implements the selected production providers and independently proves the
+real upstream producer, actual production constructor/call site, packaged
+consumer, provider topology, unchanged sandbox, cadence, lifecycle,
+degraded/loss/gap behavior, production composition, and shared-ingress/I/O-
+correlation integration. Candidate G-A proof and host-shell observation cannot
+satisfy that production obligation.
+
+The R1 gate depends on:
+
+- `phase2-io-r0-access-topology`;
+- `phase2-io-r0-identity-contract`; and
+- `phase2-io-r0-recorder-architecture`.
+
+Production-reachability remains the universal, ID-less procedure owned by
+`GUARDIAN_EXECUTION_PROTOCOL.md`. The Master-Spec outcome and R0-to-R1
+dependency direction are unchanged.

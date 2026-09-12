@@ -2,7 +2,7 @@
 title: "Master-Spec Phase 2 — I/O Guardian TDD"
 kind: "phase-tdd"
 status: "active"
-last_reviewed: "2026-09-11"
+last_reviewed: "2026-09-12"
 tags:
   - planning
   - phases
@@ -29,7 +29,11 @@ production-reachability protocol rule.
 
 ## T2-R0-A — sandbox/access matrix
 
-Run each candidate provider inside the actual packaged daemon/helper topology.
+Run each candidate route against its real upstream producer from a
+disposable/reference probe whose access profile is proven equivalent for every
+source-relevant restriction to the accepted packaged Guardian execution
+boundary. This is candidate/access proof before production implementation, not
+proof of an actual constructor, packaged consumer, or production composition.
 
 Required proof dimensions:
 
@@ -46,14 +50,28 @@ Required proof dimensions:
 For each source record:
 
 ```text
-reachable / partially reachable / unavailable
-coverage semantics
-selected provider route
-fallback route
+provider availability:
+  Available / Degraded / Unavailable / Unsupported / Unknown
+
+evidence completeness:
+  Authoritative / Partial / Unknown
+
+route decision:
+  Selected / Rejected / ExplicitlyUnavailable
+
+candidate mechanism
+fallback/rejected alternatives
 why accepted sandbox remains unchanged
 ```
 
+This is a planning representation of the three separately governed dimensions,
+not a new normative taxonomy.
+
 A host-shell proof outside the unit is insufficient.
+
+Missing production wiring alone is neither rejection nor unavailability. A
+route requiring relaxed hardening, new helper authority, or another privileged
+boundary stops for governance review. G-A owns `P2-EVT-011` and `P2-VM-006`.
 
 ## T2-R0-B — observation completeness
 
@@ -97,7 +115,9 @@ Test:
 
 ## T2-R0-E — recorder architecture/intake
 
-Before R1 acceptance, prove the selected recorder lifecycle.
+G-C must be independently accepted before any R1 scope amendment, R1 RED, or
+R1 implementation begins. This necessarily proves the selected recorder
+lifecycle before R1 interfaces freeze.
 
 Required failure tests:
 
@@ -129,6 +149,23 @@ failure-independence semantics. Otherwise the decision remains RED.
 ## T2-R1 — I/O correlation model
 
 Extend the accepted model without regressing accepted PSI/provider-health rules.
+
+R1 owns unchanged `P2-EVT-009` and `P2-VM-004` and depends on the access-
+topology, identity-contract, and recorder-architecture R0 gates. Before R1
+acceptance, create a distinct RED and then prove for every selected source:
+
+- its real upstream producer;
+- actual production constructor/call site and packaged consumer;
+- actual provider topology and unchanged accepted production sandbox;
+- real cadence and startup/restart lifecycle;
+- disappearance/re-enumeration where applicable;
+- degraded, loss, gap, partial, unavailable, and unknown behavior as applicable;
+- production composition; and
+- integration into shared ingress and I/O correlation.
+
+The G-A candidate probe and host-shell evidence cannot satisfy this production
+proof. Exact production-file scope must be added by a separately reviewed R1
+manifest amendment after the G-A ADR/source matrix is accepted.
 
 Cases:
 

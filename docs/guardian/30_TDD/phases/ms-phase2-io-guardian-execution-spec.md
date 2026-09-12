@@ -2,7 +2,7 @@
 title: "Master-Spec Phase 2 — I/O Guardian Execution Spec"
 kind: "phase-execution-spec"
 status: "active"
-last_reviewed: "2026-09-11"
+last_reviewed: "2026-09-12"
 tags:
   - planning
   - phases
@@ -131,9 +131,24 @@ This is an explicit Phase-Spec route refinement, not a silent Master-Spec edit.
 R0's **first deliverable is an accepted access/topology decision**, before
 production provider implementation.
 
+The G-A/R1 proof-ownership repair separates two evidence levels:
+
+```text
+R0 exact-production-equivalent candidate decision
+    ↓
+R1 implementation + actual packaged production proof
+```
+
+G-A exercises each real upstream producer from a disposable/reference probe
+whose access profile is proven equivalent for every source-relevant constraint
+of the intended packaged execution boundary. That proves route feasibility and
+the candidate completeness contract; it is not evidence of an unimplemented
+production constructor, packaged consumer, or composed evidence chain.
+
 ### 7.1 Sandbox/access matrix
 
-For every required source, prove access under the actual packaged unit:
+For every required source, prove candidate access under a production-equivalent
+reproduction of every source-relevant packaged-unit constraint:
 
 | Source | Preferred mechanism | Sandbox boundaries to exercise | Governed fallback decision |
 |---|---|---|---|
@@ -146,6 +161,11 @@ For every required source, prove access under the actual packaged unit:
 | PSI | inherited descriptors | already accepted | reuse unchanged |
 
 Do not broaden the daemon/helper sandbox as the default answer.
+
+Do not reject a route or call it unavailable merely because R1 has not yet
+implemented its production constructor or consumer. A route that needs relaxed
+hardening, new helper authority, or another privileged boundary triggers
+Contract Collision STOP/replan.
 
 An empty process/open-handle scan under incomplete visibility is **not proof that
 a filesystem is unused**.
@@ -191,7 +211,9 @@ Do not alter accepted PSI/provider-health rules merely to make new events fit.
 
 ### 7.5 Recorder lifecycle/intake architecture
 
-Decide before R1 interfaces freeze.
+G-C must be independently accepted before any R1 scope amendment, R1 RED, or
+R1 implementation begins. This necessarily settles the recorder decision before
+R1 interfaces freeze.
 
 The Master Spec depicts `guardian-recorder` as a boot-onward component; current
 code embeds recorder state in `guardian-daemon`, creates writable state first,
@@ -256,6 +278,20 @@ Do not infer outstanding request age/process ownership from aggregate counters.
 
 Minimal Phase 2 kernel/journal ingestion owns cursor/provenance/gap semantics;
 Phase 5 later generalizes it.
+
+R1 owns the unchanged production-strength requirements `P2-EVT-009` and
+`P2-VM-004`. For every G-A-selected route, R1 must implement and independently
+prove the real upstream producer, actual production constructor/call site,
+actual packaged consumer, provider topology, unchanged accepted production
+sandbox, real cadence, startup/restart lifecycle, applicable disappearance and
+re-enumeration, degraded/loss/gap behavior, production composition, and
+integration into shared ingress and I/O correlation. G-A candidate-probe
+evidence and host-shell visibility cannot satisfy this proof.
+
+The R1 gate depends on all three R0 gates: access topology, identity contract,
+and recorder architecture. Its production-file scope remains withheld until
+the accepted G-A ADR/source matrix identifies the selected routes and a
+separately reviewed manifest amendment names the exact files.
 
 ## 9. T2-IO-R3 — recorder intake + bounded persistence
 
@@ -416,6 +452,25 @@ Also cover device disappearance/re-enumeration and refused/busy paths.
 Recorded per the doctrine's requirement to preserve rejected, superseded, and
 current decisions with their rationale. States are explicit; an open hypothesis
 is not a decision.
+
+### SUPERSEDED — G-A proves actual production composition before R1
+
+The original R0-GOV ownership assigned `P2-EVT-009` and `P2-VM-004` to G-A,
+requiring actual production constructors and consumers even though G-A precedes
+and forbids production provider implementation. The accepted G-A RED probe at
+SHA-256
+`d224a52544dde336604abbdcb246fcc9eed9a46762777bff37b6ab8dab345952`
+exposed that impossible contract before evidence was falsified to close it.
+
+### CURRENT — candidate proof in G-A; production proof in R1
+
+G-A owns `P2-EVT-011` and `P2-VM-006`: a governed source-route decision and
+real-upstream proof under a production-equivalent reproduction of every
+source-relevant access constraint. R1 owns the unchanged `P2-EVT-009` and
+`P2-VM-004`: implementation and actual packaged production composition. This
+changes the execution route, not the Master-Spec outcome or R0-to-R1 dependency
+direction, and preserves the stronger production proof rather than weakening
+it.
 
 ### SUPERSEDED — Master-Spec Phase 2 as a reconciliation formality
 

@@ -4,13 +4,13 @@
 schema_version = 1
 gate_id = "phase2-io-r0-access-topology"
 kind = "new-implementation-gate"
-baseline_sha = "d1389378fb8dd0ac19b67d92b7b0a83a8b7e7d5a"
+baseline_sha = "b867baf21bca9b7516fef9c92937a0b104504b8c"
 tdd_file = "docs/guardian/30_TDD/gates/phase2-io-r0-access-topology-tdd.md"
 
-# Minted by TDD contract §52. T2-R0-A/T2-R0-B are planning labels, not IDs.
+# Minted by TDD contract §53. T2-R0-A/T2-R0-B are planning labels, not IDs.
 owned_normative_ids = [
-    "P2-EVT-009",
-    "P2-VM-004",
+    "P2-EVT-011",
+    "P2-VM-006",
 ]
 
 # T2-GOV and R0-GOV are satisfied prerequisites, not gate manifests.
@@ -19,8 +19,10 @@ dependencies = []
 
 [allowed_scope]
 paths = [
-    # Future gate-execution paths. The probe, ADR, and evidence files do not
-    # exist and are not created by this gate-artifact preparation pass.
+    # The collision-discovering RED probe exists and is frozen at SHA-256
+    # d224a52544dde336604abbdcb246fcc9eed9a46762777bff37b6ab8dab345952.
+    # It requires a separately reviewed post-governance RED amendment before
+    # GREEN. ADR-010 and the two G-A evidence artifacts do not yet exist.
     "crates/guardian-daemon/tests/phase2_io_r0_access_topology_probe.rs",
     "docs/adr/ADR-010-guardian-io-evidence-access-topology.md",
     "docs/evidence/p2/PHASE2_IO_R0_ACCESS_TOPOLOGY_EVIDENCE.md",
@@ -60,15 +62,16 @@ required_test_layers = ["layer1", "layer4"]
 fmt = "cargo fmt --check"
 clippy = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 test = "cargo test --workspace"
-expected_baseline = "475 passed, 0 failed, 4 ignored (published Phase 2 milestone baseline; baseline_sha d1389378)"
+expected_baseline = "475 passed, 0 failed, 4 ignored (validated at d1389378; b867baf is the docs-only gate-definition descendant and current manifest baseline)"
 
 required_evidence = [
-    "P2-EVT-009: a completed source-by-source matrix records the real upstream producer, production constructor/call site, packaged consumer, provider topology, unchanged sandbox, cadence/lifecycle, degraded path, and selected or rejected route for UDisks topology, udev/kernel topology events, process/open-handle visibility, aggregate disk statistics, request latency/diagnostics, minimal kernel/journal I/O events, and PSI context",
-    "P2-EVT-009: each selected source defines when absence is authoritative and when visibility is partial, unavailable, or unknown; no empty handle/process result is called filesystem-unused without authoritative completeness",
-    "P2-EVT-009: selected completeness semantics reuse or explicitly extend existing Availability/Knowledge concepts and do not create a competing taxonomy",
-    "P2-EVT-009: ADR-010 records tested mechanisms, rejected alternatives, sandbox implications, source provenance, and the exact scope amendment required before any production implementation",
-    "P2-VM-004: raw reproducible evidence from the packaged production daemon/helper topology exercises real producers and consumers under the accepted unchanged sandbox; host-shell-only reachability is rejected",
-    "P2-VM-004: each selected source demonstrates available/partial/unavailable/unknown behavior applicable to its real lifecycle, and the evidence records the installed unit and provider versions",
+    "P2-EVT-011: a completed source-by-source matrix records each real upstream producer, candidate mechanism, availability, completeness, cadence/lifecycle, loss/gap behavior, privilege and diagnostic-budget implications, rejected alternatives, and a governed Selected, Rejected, or ExplicitlyUnavailable decision",
+    "P2-EVT-011: missing production wiring alone establishes neither Rejected nor ExplicitlyUnavailable; no empty handle/process result is called filesystem-unused without authoritative completeness",
+    "P2-EVT-011: availability, evidence completeness, and route decision remain distinct and reuse the accepted Availability/Knowledge epistemic model",
+    "P2-EVT-011: ADR-010 records tested mechanisms, rejected alternatives, sandbox implications, source provenance, and the exact scope amendment required before any production implementation",
+    "P2-VM-006: raw reproducible evidence exercises every candidate against its real upstream producer from a probe proven production-equivalent for every source-relevant access constraint; host-shell-only reachability is rejected",
+    "P2-VM-006: evidence records applicable user/group, capabilities, NoNewPrivileges, address-family/network restrictions, device policy, process/kernel-log/control-group protections, filesystem visibility, namespaces, cadence feasibility, lifecycle, disappearance/re-enumeration, and loss/gap behavior",
+    "P2-VM-006: candidate proof is not represented as a production constructor, packaged consumer, or production composition; those remain P2-EVT-009/P2-VM-004 obligations owned by phase2-io-r1-evidence-chain",
 ]
 
 commit_policy = "leave-uncommitted-for-independent-review"
@@ -77,5 +80,6 @@ next_gate = "phase2-io-r0-identity-contract (only after this gate is independent
 # This discovery gate authorizes no production provider path and no service
 # hardening change. After the access decision is accepted, the owning
 # implementation gate must name exact production files in a separately reviewed
-# manifest amendment. Any required sandbox or privilege-topology change is a
-# Contract Collision STOP/replan.
+# manifest amendment. G-A does not authorize observation through the privileged
+# helper or a new privileged boundary. Any required sandbox or privilege-
+# topology change is a Contract Collision STOP/replan.
