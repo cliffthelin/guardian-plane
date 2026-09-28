@@ -6,6 +6,39 @@ These instructions govern all coding agents working in the Guardian repository.
 
 Guardian is an Ubuntu 26.04.1 system-control plane. It will eventually perform privileged and recovery-sensitive operations. Architectural shortcuts that would be harmless in an ordinary desktop application are not acceptable here.
 
+## Required project-memory routing (hard requirement)
+
+This repository's Guardian wiki under `docs/guardian/` is the project's
+memory: the record of prior decisions, work in progress, completed work,
+and remaining planned work. It is authoritative for that purpose ahead of
+raw git history, scattered handoffs read out of order, or an external
+search — those are frequently stale, partial, or superseded relative to
+the wiki's own maintained pointers.
+
+Before consulting any other file in this repository, and before
+consulting any external source, to answer a question about a prior
+decision, an action or decision in progress, completed work, or remaining
+planned work, an agent MUST route in this order:
+
+1. This file (`AGENTS.md`).
+2. `docs/guardian/INDEX.md` — the wiki's own front door.
+3. `docs/guardian/00_Project/GUARDIAN_ROADMAP.md` for current status
+   (what's complete, in progress, and planned), or
+   `docs/guardian/LOOKUP_MAP.md` for a specific feature/provider/concept
+   question.
+4. The specific Guardian wiki page(s) either of those route to.
+
+Only when the wiki does not answer the question may other repository
+files be read directly (raw commit history, code, non-wiki handoffs).
+Only when the repository as a whole does not answer the question may an
+external source be consulted, per the existing
+[Required lookup workflow](#required-lookup-workflow) below.
+
+This routing is not a suggestion to skip when a shortcut looks faster. A
+task is not complete if it changed project status without updating the
+wiki that was supposed to record it — see "Completion report" below and
+the [Wiki Update Workflow](docs/guardian/50_Operations/Wiki_Update_Workflow.md).
+
 ## Startup workflow for a governed gate task
 
 Added 2026-09-06 (procedural realignment; does not change any rule
@@ -151,6 +184,40 @@ A real explicit `Unsupported`/`Unavailable` result is preferred to a fake implem
 
 Scaffolding is allowed only when it compiles, is truthful about availability, and is required by the current gate.
 
+## Determinism rule
+
+Every Guardian solution and action must be deterministic by default:
+typed, rule-based, and independently re-derivable from the same inputs by
+Guardian itself, at runtime, with no reliance on an AI model or a human
+in the loop to decide the outcome.
+
+An AI crutch (an at-runtime or at-build-time model call standing in for
+logic) or a human crutch (a required manual judgment/approval step
+standing in for logic) is permitted only when all of the following hold:
+
+- Guardian's own documentation explicitly and specifically calls out,
+  at the point of use, that a deterministic implementation is not yet
+  possible for that exact action, and states why;
+- the crutch is scoped to the smallest decision that needs it, not to an
+  entire feature, module, or gate;
+- the crutch sits behind the same typed interface a deterministic
+  implementation would use, so it can be swapped out without redesigning
+  the surrounding system;
+- the crutch is recorded as an open item — ADR, Hardening Backlog entry,
+  and/or `GUARDIAN_ROADMAP.md` "in-progress" entry as appropriate — with
+  a path toward a deterministic replacement, not accepted as a finished
+  design.
+
+Do not reach for an AI model or a required human decision inside a
+privileged production code path merely because it is easier than writing
+the deterministic rule. Do not use a crutch to paper over an ambiguous
+provider/contract state; that is a fail-closed case under "Safety rules"
+above, not a crutch case.
+
+This mirrors "No placeholders": a documented crutch that is honest about
+its own limitation, and built so it can be replaced, is preferred to an
+implementation that only looks deterministic.
+
 ## Dependencies
 
 Prefer Ubuntu-packaged or well-established open-source dependencies appropriate for Ubuntu 26.04.1.
@@ -222,6 +289,20 @@ Every coding-agent completion report must include:
 - deferred work not implemented;
 - shortcuts explicitly avoided;
 - any contract ambiguity or source drift found.
+
+### Determinism
+- confirmation the implementation is deterministic, or, if not: the exact
+  AI/human crutch introduced, why a deterministic implementation was not
+  yet possible, and where it is recorded as an open item (ADR/Hardening
+  Backlog/Roadmap).
+
+### Wiki/roadmap updated
+- which Guardian wiki pages were updated to reflect this change
+  (`docs/guardian/00_Project/GUARDIAN_ROADMAP.md` and/or the specific
+  feature/module/phase page), or an explicit statement that none required
+  updating and why;
+- confirmation that no decision, in-progress item, or completed/planned
+  work changed status without a corresponding wiki update.
 
 ### Git state
 - commit/hash if the workflow permits commits;

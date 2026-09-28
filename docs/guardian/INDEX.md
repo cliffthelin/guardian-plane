@@ -12,6 +12,14 @@ tags:
 
 Local, self-contained Markdown navigation layer for Guardian and I/O Guardian development.
 
+## Current status — start here
+
+- [Guardian Roadmap](00_Project/GUARDIAN_ROADMAP.md) — completed work, work
+  in progress, open decisions, and remaining planned work. Read this
+  before any other file in the repository, or any external source, for a
+  question about project status. Required by `AGENTS.md`'s "Required
+  project-memory routing."
+
 ## Projects
 
 - [Guardian Control Plane](00_Project/Guardian_Control_Plane.md)
@@ -70,7 +78,12 @@ navigation hop, not a duplicate link inventory.
 
 ## Navigation principle
 
-A TDD or coding question should normally follow:
+A question about **project status** — a decision, work in progress,
+completed work, or planned work — should follow:
+
+**[Guardian Roadmap](00_Project/GUARDIAN_ROADMAP.md) → TDD Gate Index / Phase Execution Spec / Hardening Backlog**
+
+A TDD or coding question about a feature/provider/concept should normally follow:
 
 **lookup term → Guardian feature/module page → platform/provider page → local source snapshot → canonical URL → TDD gate/test/ADR**
 

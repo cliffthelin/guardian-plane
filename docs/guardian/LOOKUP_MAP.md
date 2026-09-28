@@ -13,6 +13,7 @@ Use this as the fast semantic router for coding agents, TDD work, audits, and fu
 
 | Search terms / question | Guardian interpretation | Authoritative/source pointer |
 |---|---|---|
+| project status, current work, what's next, decisions in progress, completed work, planned work | [Guardian Roadmap](00_Project/GUARDIAN_ROADMAP.md) | [TDD Gate Index](30_TDD/TDD_Gate_Index.md) |
 | D-Bus, IPC, bus policy | [D-Bus API Contract](20_Control_Plane/D-Bus_API_Contract.md) | [ubuntu-dbus-daemon-resolute](90_Sources/wiki/ubuntu-dbus-daemon-resolute.md) |
 | authorization, polkit, root, permissions | [Privilege and Authorization](20_Control_Plane/Privilege_and_Authorization.md) | [ubuntu-polkit-resolute](90_Sources/wiki/ubuntu-polkit-resolute.md) |
 | TUI auth, VT, recovery authentication | [Privilege and Authorization](20_Control_Plane/Privilege_and_Authorization.md) | [ubuntu-pkttyagent](90_Sources/wiki/ubuntu-pkttyagent.md) |
@@ -45,6 +46,10 @@ and not evidence that a Master-Spec phase has closed. Master-Spec Phase 2
 historical **Phase 2 — Observability & Correlation** milestone.
 
 ## Lookup discipline
+
+For a project-status question — a decision, in-progress work, completed
+work, or planned work — go to
+[Guardian Roadmap](00_Project/GUARDIAN_ROADMAP.md) first, not this table.
 
 When implementing:
 1. Start here or `INDEX.md`.
